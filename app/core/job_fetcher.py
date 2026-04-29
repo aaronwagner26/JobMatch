@@ -11,23 +11,64 @@ from bs4 import BeautifulSoup
 
 from app.core.normalizer import JobNormalizer
 from app.core.types import JobSourceConfig, NormalizedJob, ScanResult
-from app.utils.config import DEFAULT_DETAIL_FETCH_LIMIT, DEFAULT_HEADERS, DEFAULT_HTTP_TIMEOUT
+from app.utils.config import (
+    DEFAULT_DETAIL_FETCH_CONCURRENCY,
+    DEFAULT_DETAIL_FETCH_LIMIT,
+    DEFAULT_EARLY_STOP_CONSECUTIVE_PAGES,
+    DEFAULT_EARLY_STOP_KNOWN_RATIO,
+    DEFAULT_EARLY_STOP_MIN_PAGES,
+    DEFAULT_HEADERS,
+    DEFAULT_HTTP_TIMEOUT,
+    DEFAULT_REQUEST_BACKOFF_MULTIPLIER,
+    DEFAULT_REQUEST_MAX_RETRIES,
+)
 from app.utils.text import absolute_url, normalize_whitespace, strip_html
 
 logger = logging.getLogger(__name__)
 
 JSON_LD_JOB_POSTING = "jobposting"
+RETRYABLE_STATUS_CODES = {403, 408, 429, 500, 502, 503, 504}
+
+
+class SourceThrottle:
+    def __init__(self, delay_ms: int) -> None:
+        self.delay_seconds = max(delay_ms, 0) / 1000
+        self._lock = asyncio.Lock()
+        self._next_allowed_at = 0.0
+
+    async def wait(self) -> None:
+        if self.delay_seconds <= 0:
+            return
+        loop = asyncio.get_running_loop()
+        async with self._lock:
+            now = loop.time()
+            sleep_for = max(0.0, self._next_allowed_at - now)
+            if sleep_for > 0:
+                await asyncio.sleep(sleep_for)
+            self._next_allowed_at = loop.time() + self.delay_seconds
 
 
 class JobFetcher:
     def __init__(self, normalizer: JobNormalizer) -> None:
         self.normalizer = normalizer
 
-    async def scan_source(self, source: JobSourceConfig, max_jobs: int = 120) -> ScanResult:
+    async def scan_source(
+        self,
+        source: JobSourceConfig,
+        max_jobs: int = 120,
+        known_jobs: dict[str, dict[str, Any]] | None = None,
+    ) -> ScanResult:
         source_type = self._determine_source_type(source)
         source.source_type = source_type
+        throttle = SourceThrottle(source.request_delay_ms)
         try:
-            raw_jobs, etag, last_modified, not_modified = await self._fetch_jobs(source, source_type, max_jobs=max_jobs)
+            raw_jobs, etag, last_modified, not_modified = await self._fetch_jobs(
+                source,
+                source_type,
+                max_jobs=max_jobs,
+                known_jobs=known_jobs or {},
+                throttle=throttle,
+            )
             if not_modified:
                 return ScanResult(source=source, status="not_modified", response_etag=etag, response_last_modified=last_modified)
 
@@ -54,23 +95,29 @@ class JobFetcher:
         source_type: str,
         *,
         max_jobs: int,
+        known_jobs: dict[str, dict[str, Any]],
+        throttle: SourceThrottle,
     ) -> tuple[list[dict[str, Any]], str | None, str | None, bool]:
         if source_type == "greenhouse":
-            return await self._fetch_greenhouse(source)
+            return await self._fetch_greenhouse(source, throttle)
         if source_type == "lever":
-            return await self._fetch_lever(source)
+            return await self._fetch_lever(source, throttle)
         if source_type == "indeed":
-            return await self._fetch_search_page(source, parser="indeed", max_jobs=max_jobs)
+            return await self._fetch_search_page(source, parser="indeed", max_jobs=max_jobs, known_jobs=known_jobs, throttle=throttle)
         if source_type == "clearance":
-            return await self._fetch_search_page(source, parser="clearance", max_jobs=max_jobs)
-        return await self._fetch_search_page(source, parser="generic", max_jobs=max_jobs)
+            return await self._fetch_search_page(source, parser="clearance", max_jobs=max_jobs, known_jobs=known_jobs, throttle=throttle)
+        return await self._fetch_search_page(source, parser="generic", max_jobs=max_jobs, known_jobs=known_jobs, throttle=throttle)
 
-    async def _fetch_greenhouse(self, source: JobSourceConfig) -> tuple[list[dict[str, Any]], str | None, str | None, bool]:
+    async def _fetch_greenhouse(
+        self,
+        source: JobSourceConfig,
+        throttle: SourceThrottle,
+    ) -> tuple[list[dict[str, Any]], str | None, str | None, bool]:
         identifier = source.identifier or self._extract_greenhouse_identifier(source.url)
         if not identifier:
             raise ValueError("Greenhouse source requires a board token or board URL.")
         endpoint = f"https://boards-api.greenhouse.io/v1/boards/{identifier}/jobs?content=true"
-        payload, response = await self._request_json(source, endpoint)
+        payload, response = await self._request_json(source, endpoint, throttle=throttle)
         jobs = []
         for item in payload.get("jobs", []):
             jobs.append(
@@ -87,12 +134,16 @@ class JobFetcher:
             )
         return jobs, response.headers.get("etag"), response.headers.get("last-modified"), response.status_code == 304
 
-    async def _fetch_lever(self, source: JobSourceConfig) -> tuple[list[dict[str, Any]], str | None, str | None, bool]:
+    async def _fetch_lever(
+        self,
+        source: JobSourceConfig,
+        throttle: SourceThrottle,
+    ) -> tuple[list[dict[str, Any]], str | None, str | None, bool]:
         identifier = source.identifier or self._extract_lever_identifier(source.url)
         if not identifier:
             raise ValueError("Lever source requires a company slug or postings URL.")
         endpoint = f"https://api.lever.co/v0/postings/{identifier}?mode=json"
-        payload, response = await self._request_json(source, endpoint)
+        payload, response = await self._request_json(source, endpoint, throttle=throttle)
         jobs = []
         for item in payload:
             categories = item.get("categories") or {}
@@ -122,30 +173,131 @@ class JobFetcher:
         *,
         parser: str,
         max_jobs: int,
+        known_jobs: dict[str, dict[str, Any]],
+        throttle: SourceThrottle,
     ) -> tuple[list[dict[str, Any]], str | None, str | None, bool]:
-        response = await self._request_text(source, source.url)
-        if response.status_code == 304:
-            return [], response.headers.get("etag"), response.headers.get("last-modified"), True
-        html = response.text
-        jobs = self._parse_html_jobs(html, source.url, parser=parser)
-        if (source.use_playwright or not jobs) and parser in {"indeed", "clearance", "generic"}:
-            dynamic_html = await self._fetch_dynamic_html(source.url)
-            if dynamic_html:
-                jobs = self._parse_html_jobs(dynamic_html, source.url, parser=parser) or jobs
-        await self._enrich_detail_pages(jobs[:DEFAULT_DETAIL_FETCH_LIMIT], source)
-        return jobs[:max_jobs], response.headers.get("etag"), response.headers.get("last-modified"), False
+        url = source.url
+        first_response: httpx.Response | None = None
+        all_jobs: list[dict[str, Any]] = []
+        seen_external_ids: set[str] = set()
+        seen_page_urls: set[str] = {url}
+        remaining_detail_budget = DEFAULT_DETAIL_FETCH_LIMIT
+        consecutive_known_pages = 0
+        page_number = 0
+        max_pages = max(1, source.max_pages)
 
-    def _parse_html_jobs(self, html: str, base_url: str, *, parser: str) -> list[dict[str, Any]]:
-        if parser == "indeed":
-            jobs = self._parse_indeed_html(html, base_url)
-        elif parser == "clearance":
-            jobs = self._parse_clearance_html(html, base_url)
-        else:
-            jobs = self._parse_generic_html(html, base_url)
-        return self._deduplicate_jobs(jobs)
+        while url and page_number < max_pages and len(all_jobs) < max_jobs:
+            page_number += 1
+            response = await self._request_text(source, url, throttle=throttle)
+            if page_number == 1 and response.status_code == 304:
+                return [], response.headers.get("etag"), response.headers.get("last-modified"), True
+            first_response = first_response or response
 
-    def _parse_indeed_html(self, html: str, base_url: str) -> list[dict[str, Any]]:
+            page_html = response.text
+            page_jobs, next_url = self._parse_html_jobs(page_html, url, parser=parser)
+
+            if (source.use_playwright or not page_jobs) and parser in {"indeed", "clearance", "generic"}:
+                dynamic_html = await self._fetch_dynamic_html(source.url if page_number == 1 else url)
+                if dynamic_html:
+                    dynamic_jobs, dynamic_next_url = self._parse_html_jobs(dynamic_html, url, parser=parser)
+                    if dynamic_jobs:
+                        page_jobs = dynamic_jobs
+                    if dynamic_next_url:
+                        next_url = dynamic_next_url
+
+            prepared_jobs: list[dict[str, Any]] = []
+            known_count = 0
+            for payload in page_jobs:
+                prepared = self._prepare_payload(source, payload, known_jobs)
+                external_id = str(prepared["external_id"])
+                if external_id in seen_external_ids:
+                    continue
+                seen_external_ids.add(external_id)
+                if prepared.get("_known_listing"):
+                    known_count += 1
+                prepared_jobs.append(prepared)
+                if len(all_jobs) + len(prepared_jobs) >= max_jobs:
+                    break
+
+            if not prepared_jobs:
+                break
+
+            jobs_requiring_detail = [job for job in prepared_jobs if job.get("_requires_detail")]
+            if remaining_detail_budget > 0 and jobs_requiring_detail:
+                detail_batch = jobs_requiring_detail[:remaining_detail_budget]
+                await self._enrich_detail_pages(detail_batch, source, throttle=throttle)
+                remaining_detail_budget = max(0, remaining_detail_budget - len(detail_batch))
+
+            all_jobs.extend(prepared_jobs)
+            new_or_changed_count = len(prepared_jobs) - known_count
+
+            if self._is_mostly_known_page(prepared_jobs, known_count, new_or_changed_count):
+                consecutive_known_pages += 1
+            else:
+                consecutive_known_pages = 0
+
+            if (
+                page_number >= DEFAULT_EARLY_STOP_MIN_PAGES
+                and consecutive_known_pages >= DEFAULT_EARLY_STOP_CONSECUTIVE_PAGES
+            ):
+                logger.info(
+                    "Stopping early for %s after %s pages because recent pages were mostly known jobs.",
+                    source.name,
+                    page_number,
+                )
+                break
+
+            if not next_url or next_url in seen_page_urls:
+                break
+            seen_page_urls.add(next_url)
+            url = next_url
+
+        if first_response is None:
+            return [], None, None, False
+        return (
+            all_jobs[:max_jobs],
+            first_response.headers.get("etag"),
+            first_response.headers.get("last-modified"),
+            False,
+        )
+
+    def _prepare_payload(
+        self,
+        source: JobSourceConfig,
+        payload: dict[str, Any],
+        known_jobs: dict[str, dict[str, Any]],
+    ) -> dict[str, Any]:
+        prepared = dict(payload)
+        prepared["external_id"] = self.normalizer.derive_external_id(source, prepared)
+        prepared["listing_hash"] = self.normalizer.build_listing_hash(source, prepared)
+        snapshot = known_jobs.get(str(prepared["external_id"]))
+
+        if snapshot and snapshot.get("description"):
+            prepared["description"] = prepared.get("description") or snapshot["description"]
+        if snapshot and snapshot.get("employment_text") and not prepared.get("employment_text"):
+            prepared["employment_text"] = snapshot["employment_text"]
+
+        prepared["_known_snapshot"] = snapshot
+        prepared["_known_listing"] = bool(snapshot and snapshot.get("listing_hash") == prepared["listing_hash"])
+        prepared["_requires_detail"] = bool(
+            snapshot is None
+            or not snapshot.get("description")
+            or snapshot.get("listing_hash") != prepared["listing_hash"]
+        )
+        return prepared
+
+    def _parse_html_jobs(self, html: str, base_url: str, *, parser: str) -> tuple[list[dict[str, Any]], str | None]:
         soup = BeautifulSoup(html, "html.parser")
+        if parser == "indeed":
+            jobs = self._parse_indeed_html(soup, base_url)
+        elif parser == "clearance":
+            jobs = self._parse_clearance_html(soup, base_url)
+        else:
+            jobs = self._parse_generic_html(soup, base_url)
+        next_url = self._extract_next_page_url(soup, base_url, parser=parser)
+        return self._deduplicate_jobs(jobs), next_url
+
+    def _parse_indeed_html(self, soup: BeautifulSoup, base_url: str) -> list[dict[str, Any]]:
         jobs: list[dict[str, Any]] = []
         selectors = [
             "[data-jk]",
@@ -178,8 +330,7 @@ class JobFetcher:
         jobs.extend(self._extract_json_ld_jobs(soup, base_url))
         return jobs
 
-    def _parse_clearance_html(self, html: str, base_url: str) -> list[dict[str, Any]]:
-        soup = BeautifulSoup(html, "html.parser")
+    def _parse_clearance_html(self, soup: BeautifulSoup, base_url: str) -> list[dict[str, Any]]:
         jobs: list[dict[str, Any]] = []
         for container in soup.select("article, .job, .job-listing, li"):
             anchor = container.find("a", href=True)
@@ -205,8 +356,7 @@ class JobFetcher:
         jobs.extend(self._extract_json_ld_jobs(soup, base_url))
         return jobs
 
-    def _parse_generic_html(self, html: str, base_url: str) -> list[dict[str, Any]]:
-        soup = BeautifulSoup(html, "html.parser")
+    def _parse_generic_html(self, soup: BeautifulSoup, base_url: str) -> list[dict[str, Any]]:
         jobs = self._extract_json_ld_jobs(soup, base_url)
         job_like_containers = soup.select("article, li, .job, .posting, .job-listing, .result")
         for container in job_like_containers:
@@ -230,6 +380,45 @@ class JobFetcher:
                 }
             )
         return jobs
+
+    def _extract_next_page_url(self, soup: BeautifulSoup, base_url: str, *, parser: str) -> str | None:
+        selectors = [
+            "link[rel='next']",
+            "a[rel='next']",
+            "a[data-testid='pagination-page-next']",
+            "a[aria-label='Next']",
+            "a[aria-label='Next Page']",
+            "a[aria-label*='Next']",
+            ".pagination a[aria-label*='Next']",
+        ]
+        for selector in selectors:
+            node = soup.select_one(selector)
+            href = node.get("href") if node else None
+            if href:
+                return absolute_url(base_url, href)
+
+        for anchor in soup.select("a[href]"):
+            label = normalize_whitespace(
+                " ".join(
+                    filter(
+                        None,
+                        [
+                            anchor.get_text(" "),
+                            anchor.get("aria-label", ""),
+                            anchor.get("title", ""),
+                        ],
+                    )
+                )
+            ).casefold()
+            if label in {"next", "next page", "older", "more jobs"} or label.startswith("next "):
+                return absolute_url(base_url, anchor.get("href"))
+
+        if parser == "indeed":
+            for anchor in soup.select("a[href*='start=']"):
+                label = normalize_whitespace(anchor.get("aria-label") or anchor.get_text(" ")).casefold()
+                if "next" in label:
+                    return absolute_url(base_url, anchor.get("href"))
+        return None
 
     def _extract_json_ld_jobs(self, soup: BeautifulSoup, base_url: str) -> list[dict[str, Any]]:
         jobs: list[dict[str, Any]] = []
@@ -273,16 +462,22 @@ class JobFetcher:
             return jobs
         return []
 
-    async def _enrich_detail_pages(self, jobs: list[dict[str, Any]], source: JobSourceConfig) -> None:
-        candidates = [job for job in jobs if job.get("url") and not job.get("description")]
+    async def _enrich_detail_pages(
+        self,
+        jobs: list[dict[str, Any]],
+        source: JobSourceConfig,
+        *,
+        throttle: SourceThrottle,
+    ) -> None:
+        candidates = [job for job in jobs if job.get("url") and job.get("_requires_detail")]
         if not candidates:
             return
-        semaphore = asyncio.Semaphore(5)
+        semaphore = asyncio.Semaphore(DEFAULT_DETAIL_FETCH_CONCURRENCY)
 
         async def enrich(job: dict[str, Any]) -> None:
             async with semaphore:
                 try:
-                    response = await self._request_text(source, job["url"], conditional=False)
+                    response = await self._request_text(source, job["url"], throttle=throttle, conditional=False)
                 except Exception:
                     return
                 soup = BeautifulSoup(response.text, "html.parser")
@@ -296,14 +491,27 @@ class JobFetcher:
 
         await asyncio.gather(*(enrich(job) for job in candidates))
 
-    async def _request_json(self, source: JobSourceConfig, url: str) -> tuple[Any, httpx.Response]:
-        response = await self._request_text(source, url)
+    async def _request_json(
+        self,
+        source: JobSourceConfig,
+        url: str,
+        *,
+        throttle: SourceThrottle,
+    ) -> tuple[Any, httpx.Response]:
+        response = await self._request_text(source, url, throttle=throttle)
         if response.status_code == 304:
             return {}, response
         response.raise_for_status()
         return response.json(), response
 
-    async def _request_text(self, source: JobSourceConfig, url: str, *, conditional: bool = True) -> httpx.Response:
+    async def _request_text(
+        self,
+        source: JobSourceConfig,
+        url: str,
+        *,
+        throttle: SourceThrottle,
+        conditional: bool = True,
+    ) -> httpx.Response:
         headers = dict(DEFAULT_HEADERS)
         headers.update(source.headers)
         if conditional:
@@ -311,11 +519,34 @@ class JobFetcher:
                 headers["If-None-Match"] = source.etag
             if source.last_modified:
                 headers["If-Modified-Since"] = source.last_modified
-        async with httpx.AsyncClient(timeout=DEFAULT_HTTP_TIMEOUT, follow_redirects=True, headers=headers) as client:
-            response = await client.get(url)
-        if response.status_code not in {200, 304}:
+
+        last_error: Exception | None = None
+        for attempt in range(DEFAULT_REQUEST_MAX_RETRIES + 1):
+            await throttle.wait()
+            try:
+                async with httpx.AsyncClient(timeout=DEFAULT_HTTP_TIMEOUT, follow_redirects=True, headers=headers) as client:
+                    response = await client.get(url)
+            except httpx.RequestError as exc:
+                last_error = exc
+                if attempt >= DEFAULT_REQUEST_MAX_RETRIES:
+                    raise
+                await self._sleep_with_backoff(source, attempt)
+                continue
+
+            if response.status_code in {200, 304}:
+                return response
+            if response.status_code in RETRYABLE_STATUS_CODES and attempt < DEFAULT_REQUEST_MAX_RETRIES:
+                await self._sleep_with_backoff(source, attempt)
+                continue
             response.raise_for_status()
-        return response
+
+        if last_error:
+            raise last_error
+        raise RuntimeError(f"Request failed for {url}")
+
+    async def _sleep_with_backoff(self, source: JobSourceConfig, attempt: int) -> None:
+        base_delay = max(source.request_delay_ms, 250) / 1000
+        await asyncio.sleep(base_delay * (DEFAULT_REQUEST_BACKOFF_MULTIPLIER ** attempt))
 
     async def _fetch_dynamic_html(self, url: str) -> str | None:
         try:
@@ -380,6 +611,13 @@ class JobFetcher:
             seen.add(key)
             deduped.append(job)
         return deduped
+
+    @staticmethod
+    def _is_mostly_known_page(page_jobs: list[dict[str, Any]], known_count: int, new_or_changed_count: int) -> bool:
+        if len(page_jobs) < 5:
+            return False
+        known_ratio = known_count / len(page_jobs)
+        return known_ratio >= DEFAULT_EARLY_STOP_KNOWN_RATIO and new_or_changed_count <= max(1, len(page_jobs) // 6)
 
     @staticmethod
     def _first_text(container, selectors: list[str]) -> str:

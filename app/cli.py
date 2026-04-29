@@ -26,6 +26,8 @@ def build_parser() -> argparse.ArgumentParser:
     source_add.add_argument("--disabled", action="store_true")
     source_add.add_argument("--playwright", action="store_true")
     source_add.add_argument("--refresh-minutes", type=int, default=180)
+    source_add.add_argument("--max-pages", type=int, default=3)
+    source_add.add_argument("--request-delay-ms", type=int, default=750)
     source_add.add_argument("--notes", default="")
 
     subparsers.add_parser("sources", help="List configured sources")
@@ -65,6 +67,8 @@ def main() -> None:
                 enabled=not args.disabled,
                 use_playwright=args.playwright,
                 refresh_minutes=args.refresh_minutes,
+                max_pages=args.max_pages,
+                request_delay_ms=args.request_delay_ms,
                 notes=args.notes,
             )
         )

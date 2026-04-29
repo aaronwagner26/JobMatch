@@ -11,7 +11,15 @@ from nicegui import app, events, ui
 
 from app.core.engine import JobMatchEngine
 from app.core.types import FilterCriteria, JobSourceConfig, MatchResult
-from app.utils.config import APP_NAME, JOB_TYPES, REMOTE_MODES, SOURCE_TYPES, UPLOADS_DIR
+from app.utils.config import (
+    APP_NAME,
+    DEFAULT_SOURCE_MAX_PAGES,
+    DEFAULT_SOURCE_REQUEST_DELAY_MS,
+    JOB_TYPES,
+    REMOTE_MODES,
+    SOURCE_TYPES,
+    UPLOADS_DIR,
+)
 from app.utils.logging import configure_logging
 from app.utils.skills import CLEARANCE_PATTERNS
 from app.utils.text import clipped_excerpt, safe_filename
@@ -143,6 +151,8 @@ class UIState:
             "enabled": True,
             "use_playwright": False,
             "refresh_minutes": 180,
+            "max_pages": DEFAULT_SOURCE_MAX_PAGES,
+            "request_delay_ms": DEFAULT_SOURCE_REQUEST_DELAY_MS,
             "notes": "",
         }
     )
@@ -333,6 +343,8 @@ class JobMatchUI:
                         self.source_inputs["url"] = ui.input("URL or search page", value=form["url"]).props("outlined").classes("col-span-2")
                         self.source_inputs["identifier"] = ui.input("API identifier", value=form["identifier"]).props("outlined")
                         self.source_inputs["refresh_minutes"] = ui.number("Refresh minutes", value=form["refresh_minutes"], min=15, step=15).props("outlined")
+                        self.source_inputs["max_pages"] = ui.number("Max pages", value=form["max_pages"], min=1, step=1).props("outlined")
+                        self.source_inputs["request_delay_ms"] = ui.number("Request delay (ms)", value=form["request_delay_ms"], min=0, step=250).props("outlined")
                         self.source_inputs["enabled"] = ui.switch("Enabled", value=form["enabled"])
                         self.source_inputs["use_playwright"] = ui.switch("Use Playwright fallback", value=form["use_playwright"])
                     self.source_inputs["notes"] = ui.textarea("Notes", value=form["notes"]).props("outlined autogrow").classes("w-full mt-3")
@@ -494,6 +506,8 @@ class JobMatchUI:
             "enabled": source.enabled,
             "use_playwright": source.use_playwright,
             "refresh_minutes": source.refresh_minutes,
+            "max_pages": source.max_pages,
+            "request_delay_ms": source.request_delay_ms,
             "notes": source.notes,
         }
         self.render_current_view()
@@ -513,6 +527,8 @@ class JobMatchUI:
             enabled=bool(self.source_inputs["enabled"].value),
             use_playwright=bool(self.source_inputs["use_playwright"].value),
             refresh_minutes=int(self.source_inputs["refresh_minutes"].value or 180),
+            max_pages=max(1, int(self.source_inputs["max_pages"].value or DEFAULT_SOURCE_MAX_PAGES)),
+            request_delay_ms=max(0, int(self.source_inputs["request_delay_ms"].value or DEFAULT_SOURCE_REQUEST_DELAY_MS)),
             notes=self.source_inputs["notes"].value or "",
         )
         if not payload.name or not payload.url:

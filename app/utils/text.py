@@ -6,7 +6,7 @@ import re
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
-from urllib.parse import urljoin
+from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
 
 import numpy as np
 from bs4 import BeautifulSoup
@@ -14,6 +14,18 @@ from dateutil import parser as date_parser
 
 WHITESPACE_RE = re.compile(r"\s+")
 NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
+TRACKING_QUERY_KEYS = {
+    "fbclid",
+    "gclid",
+    "gh_src",
+    "lever-source",
+    "ref",
+    "referrer",
+    "source",
+    "src",
+    "tracking",
+    "trk",
+}
 
 
 def normalize_whitespace(text: str | None) -> str:
@@ -52,6 +64,35 @@ def absolute_url(base_url: str | None, link: str | None) -> str:
     if not link:
         return ""
     return urljoin(base_url or "", link)
+
+
+def canonical_job_url(url: str | None) -> str:
+    if not url:
+        return ""
+    split = urlsplit(url)
+    if not split.scheme or not split.netloc:
+        return normalize_whitespace(url)
+    filtered_query = [
+        (key, value)
+        for key, value in parse_qsl(split.query, keep_blank_values=False)
+        if not key.casefold().startswith("utm_") and key.casefold() not in TRACKING_QUERY_KEYS
+    ]
+    normalized_path = re.sub(r"/{2,}", "/", split.path or "/").rstrip("/") or "/"
+    query = urlencode(sorted(filtered_query))
+    return urlunsplit((split.scheme.casefold(), split.netloc.casefold(), normalized_path, query, ""))
+
+
+def canonical_job_key(title: str, company: str, location: str, url: str | None, job_type: str | None = None) -> str:
+    canonical_url = canonical_job_url(url)
+    if canonical_url:
+        return f"url:{canonical_url}"
+    pieces = [
+        normalize_whitespace(title).casefold(),
+        normalize_whitespace(company).casefold(),
+        normalize_whitespace(location).casefold(),
+        normalize_whitespace(job_type).casefold(),
+    ]
+    return "title:" + "|".join(pieces)
 
 
 def parse_datetime(value: Any) -> datetime | None:
@@ -112,4 +153,3 @@ def write_text_file(path: Path, text: str) -> Path:
 
 def decode_html(value: str | None) -> str:
     return html.unescape(value or "")
-

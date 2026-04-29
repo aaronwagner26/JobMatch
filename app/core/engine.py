@@ -13,7 +13,7 @@ from app.core.resume_parser import ResumeParser
 from app.core.types import FilterCriteria, JobSourceConfig, MatchResult, MatchWeights, ResumeProfile, ScanSummary
 from app.db.storage import Storage
 from app.utils.config import DEFAULT_SCAN_CONCURRENCY, DEFAULT_SETTINGS, EXPORTS_DIR, UPLOADS_DIR, ensure_directories
-from app.utils.text import safe_filename
+from app.utils.text import canonical_job_key, safe_filename
 
 
 class JobMatchEngine:
@@ -68,7 +68,8 @@ class JobMatchEngine:
             async def run_scan(source: JobSourceConfig):
                 async with semaphore:
                     scan_id = self.storage.begin_scan(source.id)
-                    result = await self.job_fetcher.scan_source(source, max_jobs=max_jobs)
+                    known_jobs = self.storage.get_source_job_index(source.id or 0)
+                    result = await self.job_fetcher.scan_source(source, max_jobs=max_jobs, known_jobs=known_jobs)
                     if result.status == "ok":
                         created, updated, unchanged, deactivated = self.storage.upsert_jobs(source, result.jobs)
                         result.jobs_created = created
@@ -119,6 +120,7 @@ class JobMatchEngine:
             experience=float(settings.get("experience_weight", DEFAULT_SETTINGS["experience_weight"])),
         )
         matcher = JobMatcher(str(settings.get("embedding_model_name", DEFAULT_SETTINGS["embedding_model_name"])), weights)
+        jobs = self._deduplicate_jobs(jobs)
         resume, jobs, job_embeddings = matcher.ensure_embeddings(resume, jobs)
         if resume.id and resume.embedding:
             self.storage.save_resume_embedding(resume.id, resume.embedding)
@@ -194,6 +196,32 @@ class JobMatchEngine:
         return self.storage.list_scans(limit=limit)
 
     @staticmethod
+    def _deduplicate_jobs(jobs: list) -> list:
+        deduped: dict[str, object] = {}
+        for job in jobs:
+            key = canonical_job_key(
+                job.title,
+                job.company,
+                job.location,
+                job.metadata.get("canonical_url") or job.url,
+                job.job_type,
+            )
+            current = deduped.get(key)
+            if current is None or JobMatchEngine._job_sort_key(job) > JobMatchEngine._job_sort_key(current):
+                deduped[key] = job
+        return list(deduped.values())
+
+    @staticmethod
+    def _job_sort_key(job) -> tuple:
+        recency = job.last_seen_at or job.last_updated_at or job.first_seen_at or datetime.min.replace(tzinfo=UTC)
+        return (
+            len(job.description or ""),
+            len(job.required_skills or []),
+            len(job.skills or []),
+            recency,
+        )
+
+    @staticmethod
     def _match_to_dict(match: MatchResult) -> dict:
         return {
             "score": match.score,
@@ -223,4 +251,3 @@ class JobMatchEngine:
                 "experience_years": match.job.experience_years,
             },
         }
-

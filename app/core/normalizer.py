@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 
 from app.core.types import JobSourceConfig, NormalizedJob
 from app.utils.skills import detect_job_type, detect_remote_mode, extract_clearance_terms, extract_skills
-from app.utils.text import clipped_excerpt, dt_to_iso, normalize_whitespace, parse_datetime, text_hash
+from app.utils.text import canonical_job_url, clipped_excerpt, dt_to_iso, normalize_whitespace, parse_datetime, text_hash
 
 REQUIREMENT_SPLIT_RE = re.compile(
     r"(requirements|qualifications|must have|what you[' ]?ll need|what we[' ]?re looking for)",
@@ -38,7 +38,9 @@ class JobNormalizer:
         clearance_terms = extract_clearance_terms(combined_text)
         experience_years = self._extract_experience_years(required_text or description)
         posted_at = parse_datetime(payload.get("posted_at"))
-        external_id = str(payload.get("external_id") or payload.get("raw_id") or text_hash(f"{source.id}:{title}:{company}:{payload.get('url')}"))
+        external_id = self.derive_external_id(source, payload)
+        listing_hash = payload.get("listing_hash") or self.build_listing_hash(source, payload)
+        canonical_url = payload.get("canonical_url") or canonical_job_url(payload.get("url") or source.url)
 
         summary_text = "\n".join(
             filter(
@@ -60,6 +62,8 @@ class JobNormalizer:
             {
                 "normalized_at": dt_to_iso(datetime.now(UTC)),
                 "snippet": clipped_excerpt(description, 320),
+                "listing_hash": listing_hash,
+                "canonical_url": canonical_url,
                 "raw_payload_keys": sorted(payload.keys()),
             }
         )
@@ -88,6 +92,27 @@ class JobNormalizer:
             metadata=metadata,
             content_hash=text_hash(summary_text),
         )
+
+    @staticmethod
+    def derive_external_id(source: JobSourceConfig, payload: dict) -> str:
+        title = normalize_whitespace(payload.get("title"))
+        company = normalize_whitespace(payload.get("company") or source.name)
+        url = payload.get("url") or source.url
+        return str(payload.get("external_id") or payload.get("raw_id") or text_hash(f"{source.id}:{title}:{company}:{url}"))
+
+    @staticmethod
+    def build_listing_hash(source: JobSourceConfig, payload: dict) -> str:
+        listing_signature = "\n".join(
+            [
+                normalize_whitespace(payload.get("title")),
+                normalize_whitespace(payload.get("company") or source.name),
+                normalize_whitespace(payload.get("location")),
+                normalize_whitespace(payload.get("summary") or payload.get("description")),
+                normalize_whitespace(str(payload.get("posted_at") or "")),
+                canonical_job_url(payload.get("url") or source.url),
+            ]
+        )
+        return text_hash(listing_signature)
 
     @staticmethod
     def _section_text(existing: str | None, description: str, splitter: re.Pattern[str]) -> str:

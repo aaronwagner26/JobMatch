@@ -4,12 +4,12 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 
-from sqlalchemy import create_engine, delete, select
+from sqlalchemy import create_engine, delete, inspect, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.types import JobSourceConfig, NormalizedJob, ResumeProfile
 from app.db.models import AppSettingRecord, Base, JobRecord, ResumeRecord, ScanRecord, SourceRecord
-from app.utils.config import DB_PATH, DEFAULT_SETTINGS, ensure_directories
+from app.utils.config import DB_PATH, DEFAULT_SETTINGS, DEFAULT_SOURCE_MAX_PAGES, DEFAULT_SOURCE_REQUEST_DELAY_MS, ensure_directories
 
 
 class Storage:
@@ -21,6 +21,7 @@ class Storage:
 
     def init_db(self) -> None:
         Base.metadata.create_all(self.engine)
+        self._migrate_db()
         for key, value in DEFAULT_SETTINGS.items():
             self.set_setting(key, value)
 
@@ -129,6 +130,8 @@ class Storage:
                     enabled=payload.enabled,
                     use_playwright=payload.use_playwright,
                     refresh_minutes=payload.refresh_minutes,
+                    max_pages=payload.max_pages,
+                    request_delay_ms=payload.request_delay_ms,
                     notes=payload.notes,
                     headers=payload.headers,
                 )
@@ -141,6 +144,8 @@ class Storage:
                 record.enabled = payload.enabled
                 record.use_playwright = payload.use_playwright
                 record.refresh_minutes = payload.refresh_minutes
+                record.max_pages = payload.max_pages
+                record.request_delay_ms = payload.request_delay_ms
                 record.notes = payload.notes
                 record.headers = payload.headers
             session.flush()
@@ -220,6 +225,23 @@ class Storage:
             record.last_status = status
             record.etag = etag or record.etag
             record.last_modified = last_modified or record.last_modified
+
+    def get_source_job_index(self, source_id: int) -> dict[str, dict]:
+        with self.session() as session:
+            records = session.scalars(select(JobRecord).where(JobRecord.source_id == source_id)).all()
+            index: dict[str, dict] = {}
+            for record in records:
+                metadata = dict(record.metadata_json or {})
+                index[record.external_id] = {
+                    "content_hash": record.content_hash,
+                    "listing_hash": metadata.get("listing_hash"),
+                    "canonical_url": metadata.get("canonical_url") or record.url,
+                    "description": record.description,
+                    "employment_text": record.employment_text,
+                    "active": record.active,
+                    "last_seen_at": record.last_seen_at,
+                }
+            return index
 
     def upsert_jobs(self, source: JobSourceConfig, jobs: list[NormalizedJob]) -> tuple[int, int, int, int]:
         created = 0
@@ -322,6 +344,24 @@ class Storage:
         with self.session() as session:
             session.execute(delete(JobRecord).where(JobRecord.source_id == source_id))
 
+    def _migrate_db(self) -> None:
+        inspector = inspect(self.engine)
+        if not inspector.has_table("sources"):
+            return
+        source_columns = {column["name"] for column in inspector.get_columns("sources")}
+        statements: list[str] = []
+        if "max_pages" not in source_columns:
+            statements.append(f"ALTER TABLE sources ADD COLUMN max_pages INTEGER DEFAULT {DEFAULT_SOURCE_MAX_PAGES}")
+        if "request_delay_ms" not in source_columns:
+            statements.append(
+                f"ALTER TABLE sources ADD COLUMN request_delay_ms INTEGER DEFAULT {DEFAULT_SOURCE_REQUEST_DELAY_MS}"
+            )
+        if not statements:
+            return
+        with self.engine.begin() as connection:
+            for statement in statements:
+                connection.exec_driver_sql(statement)
+
     @staticmethod
     def _resume_from_record(record: ResumeRecord) -> ResumeProfile:
         return ResumeProfile(
@@ -352,6 +392,8 @@ class Storage:
             enabled=record.enabled,
             use_playwright=record.use_playwright,
             refresh_minutes=record.refresh_minutes,
+            max_pages=record.max_pages or DEFAULT_SOURCE_MAX_PAGES,
+            request_delay_ms=record.request_delay_ms or DEFAULT_SOURCE_REQUEST_DELAY_MS,
             notes=record.notes,
             headers=dict(record.headers or {}),
             etag=record.etag,

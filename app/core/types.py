@@ -33,6 +33,8 @@ class JobSourceConfig:
     enabled: bool = True
     use_playwright: bool = False
     refresh_minutes: int = 180
+    max_pages: int = 3
+    request_delay_ms: int = 750
     notes: str = ""
     headers: dict[str, str] = field(default_factory=dict)
     etag: str | None = None
@@ -136,4 +138,3 @@ class ScanSummary:
     @property
     def total_jobs(self) -> int:
         return sum(len(result.jobs) for result in self.results)
-
