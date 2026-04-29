@@ -703,7 +703,7 @@ def _resolve_host(host: str | None) -> str:
     env_host = os.getenv("JOBMATCH_HOST")
     if env_host:
         return env_host
-    return "0.0.0.0"
+    return "127.0.0.1"
 
 
 def _parse_args() -> argparse.Namespace:
