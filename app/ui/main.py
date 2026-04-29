@@ -152,6 +152,7 @@ class UIState:
     matches: list[MatchResult] = field(default_factory=list)
     match_error: str = ""
     scan_running: bool = False
+    scan_stop_requested: bool = False
     scan_status: str = "Ready"
     scan_error: str = ""
     scan_source_total: int = 0
@@ -189,6 +190,7 @@ class JobMatchUI:
         self.status_label = None
         self.last_scan_label = None
         self.scan_button = None
+        self.stop_scan_button = None
         self.scan_summary_panel = None
         self.scan_log_panel = None
         self.scan_log_widget = None
@@ -211,6 +213,8 @@ class JobMatchUI:
                     self.last_scan_label = ui.label("Last scan: never").classes("text-slate-300 text-sm")
                     ui.switch("Dark", value=False, on_change=lambda e: self.dark_mode.set_value(e.value)).classes("text-white")
                     self.scan_button = ui.button("Scan now", icon="sync", on_click=lambda: asyncio.create_task(self.handle_scan())).props("unelevated")
+                    self.stop_scan_button = ui.button("Stop scan", icon="stop_circle", on_click=self.request_scan_stop).props("flat color=negative")
+                    self.stop_scan_button.disable()
 
         with ui.left_drawer(value=True, bordered=False, elevated=False).classes("app-drawer w-72"):
             self.nav_shell = ui.column().classes("w-full gap-3 p-4")
@@ -643,7 +647,10 @@ class JobMatchUI:
             return
         if self.scan_button:
             self.scan_button.disable()
+        if self.stop_scan_button:
+            self.stop_scan_button.enable()
         self.state.scan_running = True
+        self.state.scan_stop_requested = False
         self.state.scan_error = ""
         self.state.scan_status = "Scanning sources..."
         self.state.scan_source_total = 0
@@ -656,6 +663,7 @@ class JobMatchUI:
             summary = await self.engine.scan_sources(on_progress=self._handle_scan_progress)
             self._apply_scan_summary(summary)
             self.state.scan_running = False
+            self.state.scan_stop_requested = False
             self.state.scan_status = self._scan_complete_status(summary)
             if summary.results:
                 self.last_scan_label.set_text(f"Last scan: {summary.finished_at:%Y-%m-%d %H:%M}")
@@ -663,6 +671,7 @@ class JobMatchUI:
             await self.refresh_matches(record_activity=True)
         except Exception as exc:
             self.state.scan_running = False
+            self.state.scan_stop_requested = False
             self.state.scan_error = str(exc)
             self.status_label.set_text("Scan failed")
             self.state.scan_status = "Scan failed"
@@ -670,11 +679,30 @@ class JobMatchUI:
         finally:
             if self.scan_button:
                 self.scan_button.enable()
+            if self.stop_scan_button:
+                self.stop_scan_button.disable()
             self.state.recent_scans = self.engine.list_recent_scans(limit=8)
             if self.status_label.text == "Scanning sources...":
                 self.status_label.set_text("Ready")
             self.render_scan_summary_panel()
             self.render_scan_log_panel()
+
+    def request_scan_stop(self) -> None:
+        if not self.state.scan_running or self.state.scan_stop_requested:
+            return
+        if not self.engine.cancel_scan():
+            self._append_activity("Stop request ignored because no scan is currently active.")
+            self.render_scan_log_panel()
+            return
+        self.state.scan_stop_requested = True
+        self.state.scan_status = "Stopping scan after current request..."
+        if self.status_label is not None:
+            self.status_label.set_text(self.state.scan_status)
+        if self.stop_scan_button is not None:
+            self.stop_scan_button.disable()
+        self._append_activity("Stop requested. Finishing the current request and cancelling remaining source work.")
+        self.render_scan_summary_panel()
+        self.render_scan_log_panel()
 
     async def schedule_tick(self) -> None:
         if self._client_deleted:
@@ -877,15 +905,33 @@ class JobMatchUI:
             row["block_reason"] = str(event.get("block_reason") or "")
             row["note"] = self._source_finished_note(row)
             self.state.scan_sources_finished = sum(
-                1 for scan_row in self.state.scan_rows if scan_row["status"] in {"ok", "not_modified", "error", "blocked"}
+                1
+                for scan_row in self.state.scan_rows
+                if scan_row["status"] in {"ok", "not_modified", "error", "blocked", "cancelled"}
             )
-            self.state.scan_status = f"Scanning {self.state.scan_sources_finished}/{max(self.state.scan_source_total, 1)} sources..."
+            if self.state.scan_stop_requested:
+                self.state.scan_status = (
+                    f"Stopping scan... {self.state.scan_sources_finished}/{max(self.state.scan_source_total, 1)} sources settled"
+                )
+            else:
+                self.state.scan_status = f"Scanning {self.state.scan_sources_finished}/{max(self.state.scan_source_total, 1)} sources..."
             if row["status"] == "blocked":
                 self._append_activity(f"{row['source_name']}: blocked by site security checks.")
+            elif row["status"] == "cancelled":
+                self._append_activity(f"{row['source_name']}: cancelled before completion.")
             else:
                 self._append_activity(
                     f"{row['source_name']}: {row['status']} ({row['jobs_created']} new, {row['jobs_updated']} updated, {row['jobs_unchanged']} unchanged)."
                 )
+        elif kind == "scan_cancelled":
+            self.state.scan_status = (
+                f"Scan stopped: {event.get('total_created', 0)} new, "
+                f"{event.get('total_updated', 0)} updated, {event.get('cancelled_count', 0)} cancelled"
+            )
+            self._append_activity(
+                f"Scan stopped: {event.get('total_jobs', 0)} job(s) kept, "
+                f"{event.get('cancelled_count', 0)} source(s) cancelled before completion."
+            )
         elif kind == "scan_finished":
             self.state.scan_status = (
                 f"Scan complete: {event.get('total_created', 0)} new, "
@@ -907,6 +953,11 @@ class JobMatchUI:
         self.state.scan_rows = [self._scan_result_row(result) for result in summary.results]
 
     def _scan_complete_status(self, summary: ScanSummary) -> str:
+        if summary.cancelled_count:
+            return (
+                f"Scan stopped: {summary.total_created} new, {summary.total_updated} updated, "
+                f"{summary.cancelled_count} cancelled"
+            )
         return (
             f"Scan complete: {summary.total_created} new, {summary.total_updated} updated, "
             f"{summary.blocked_count} blocked, {summary.error_count} issue(s)"
@@ -955,6 +1006,8 @@ class JobMatchUI:
     def _source_finished_note(row: dict[str, Any]) -> str:
         if row["status"] == "blocked" and row["error"]:
             return row["error"]
+        if row["status"] == "cancelled":
+            return row["error"] or "Cancelled before completion."
         if row["status"] == "error" and row["error"]:
             return row["error"]
         note = (

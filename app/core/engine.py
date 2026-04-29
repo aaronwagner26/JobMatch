@@ -25,6 +25,7 @@ class JobMatchEngine:
         self.resume_parser = ResumeParser()
         self.job_fetcher = JobFetcher(JobNormalizer())
         self._scan_lock = asyncio.Lock()
+        self._scan_cancel_requested = asyncio.Event()
         self._matcher_cache: dict[tuple[str, float, float, float], JobMatcher] = {}
 
     def save_resume(self, source_path: str | Path) -> ResumeProfile:
@@ -55,12 +56,22 @@ class JobMatchEngine:
     def update_settings(self, values: dict) -> None:
         self.storage.update_settings(values)
 
+    def cancel_scan(self) -> bool:
+        if not self._scan_lock.locked():
+            return False
+        self._scan_cancel_requested.set()
+        return True
+
+    def scan_running(self) -> bool:
+        return self._scan_lock.locked()
+
     async def scan_sources(
         self,
         source_ids: list[int] | None = None,
         on_progress: Callable[[dict], None] | None = None,
     ) -> ScanSummary:
         async with self._scan_lock:
+            self._scan_cancel_requested.clear()
             sources = [source for source in self.storage.list_sources() if source.enabled]
             if source_ids:
                 sources = [source for source in sources if source.id in source_ids]
@@ -84,53 +95,59 @@ class JobMatchEngine:
 
             async def run_scan(source: JobSourceConfig):
                 async with semaphore:
-                    self._emit_progress(
-                        on_progress,
-                        event="source_started",
-                        source_id=source.id,
-                        source_name=source.name,
-                        source_type=source.source_type,
-                    )
-                    scan_id = self.storage.begin_scan(source.id)
-                    known_jobs = self.storage.get_source_job_index(source.id or 0)
-                    result = await self.job_fetcher.scan_source(
-                        source,
-                        max_jobs=max_jobs,
-                        known_jobs=known_jobs,
-                        progress_callback=on_progress,
-                    )
-                    if result.status == "ok":
-                        created, updated, unchanged, deactivated = self.storage.upsert_jobs(source, result.jobs)
-                        result.jobs_created = created
-                        result.jobs_updated = updated
-                        result.jobs_unchanged = unchanged
-                        result.jobs_deactivated = deactivated
-                        self.storage.update_source_scan_state(
-                            source.id or 0,
-                            status=result.status,
-                            etag=result.response_etag,
-                            last_modified=result.response_last_modified,
-                        )
-                        self.storage.finish_scan(
-                            scan_id,
-                            status=result.status,
-                            jobs_found=len(result.jobs),
-                            jobs_created=created,
-                            jobs_updated=updated,
-                            jobs_unchanged=unchanged,
-                            jobs_deactivated=deactivated,
-                        )
-                    elif result.status == "not_modified":
-                        self.storage.update_source_scan_state(
-                            source.id or 0,
-                            status=result.status,
-                            etag=result.response_etag,
-                            last_modified=result.response_last_modified,
-                        )
-                        self.storage.finish_scan(scan_id, status=result.status)
+                    scan_id: int | None = None
+                    if self._scan_cancel_requested.is_set():
+                        result = self.job_fetcher.cancelled_result(source)
                     else:
-                        self.storage.update_source_scan_state(source.id or 0, status=result.status)
-                        self.storage.finish_scan(scan_id, status=result.status, error_text=result.error)
+                        self._emit_progress(
+                            on_progress,
+                            event="source_started",
+                            source_id=source.id,
+                            source_name=source.name,
+                            source_type=source.source_type,
+                        )
+                        scan_id = self.storage.begin_scan(source.id)
+                        known_jobs = self.storage.get_source_job_index(source.id or 0)
+                        result = await self.job_fetcher.scan_source(
+                            source,
+                            max_jobs=max_jobs,
+                            known_jobs=known_jobs,
+                            progress_callback=on_progress,
+                            cancel_requested=self._scan_cancel_requested.is_set,
+                        )
+                    if scan_id is not None:
+                        if result.status == "ok":
+                            created, updated, unchanged, deactivated = self.storage.upsert_jobs(source, result.jobs)
+                            result.jobs_created = created
+                            result.jobs_updated = updated
+                            result.jobs_unchanged = unchanged
+                            result.jobs_deactivated = deactivated
+                            self.storage.update_source_scan_state(
+                                source.id or 0,
+                                status=result.status,
+                                etag=result.response_etag,
+                                last_modified=result.response_last_modified,
+                            )
+                            self.storage.finish_scan(
+                                scan_id,
+                                status=result.status,
+                                jobs_found=len(result.jobs),
+                                jobs_created=created,
+                                jobs_updated=updated,
+                                jobs_unchanged=unchanged,
+                                jobs_deactivated=deactivated,
+                            )
+                        elif result.status == "not_modified":
+                            self.storage.update_source_scan_state(
+                                source.id or 0,
+                                status=result.status,
+                                etag=result.response_etag,
+                                last_modified=result.response_last_modified,
+                            )
+                            self.storage.finish_scan(scan_id, status=result.status)
+                        else:
+                            self.storage.update_source_scan_state(source.id or 0, status=result.status)
+                            self.storage.finish_scan(scan_id, status=result.status, error_text=result.error)
                     self._emit_progress(
                         on_progress,
                         event="source_finished",
@@ -152,9 +169,10 @@ class JobMatchEngine:
 
             results = await asyncio.gather(*(run_scan(source) for source in sources))
             summary = ScanSummary(started_at=started_at, finished_at=datetime.now(UTC), results=list(results))
+            event_name = "scan_cancelled" if summary.cancelled_count else "scan_finished"
             self._emit_progress(
                 on_progress,
-                event="scan_finished",
+                event=event_name,
                 started_at=summary.started_at,
                 finished_at=summary.finished_at,
                 source_count=len(summary.results),
@@ -164,6 +182,7 @@ class JobMatchEngine:
                 total_unchanged=summary.total_unchanged,
                 total_deactivated=summary.total_deactivated,
                 blocked_count=summary.blocked_count,
+                cancelled_count=summary.cancelled_count,
                 error_count=summary.error_count,
             )
             return summary

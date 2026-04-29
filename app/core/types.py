@@ -167,3 +167,7 @@ class ScanSummary:
     @property
     def blocked_count(self) -> int:
         return sum(1 for result in self.results if result.status == "blocked")
+
+    @property
+    def cancelled_count(self) -> int:
+        return sum(1 for result in self.results if result.status == "cancelled")

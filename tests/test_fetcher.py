@@ -82,12 +82,12 @@ def test_fetcher_paginates_and_stops_after_mostly_known_pages() -> None:
 
     requested_urls: list[str] = []
 
-    async def fake_request_text(scan_source, url, *, throttle, conditional=True):  # noqa: ANN001
+    async def fake_request_text(scan_source, url, *, throttle, conditional=True, cancel_requested=None):  # noqa: ANN001
         requested_urls.append(url)
         return FakeResponse(responses[url], headers={"etag": "etag-1"})
 
     fetcher._request_text = fake_request_text  # type: ignore[method-assign]
-    async def fake_dynamic_html(scan_source, url, *, progress_callback=None):  # noqa: ANN001
+    async def fake_dynamic_html(scan_source, url, *, progress_callback=None, cancel_requested=None):  # noqa: ANN001
         return None
 
     fetcher._fetch_dynamic_html = fake_dynamic_html  # type: ignore[method-assign]
@@ -135,17 +135,17 @@ def test_fetcher_only_enriches_new_or_changed_jobs() -> None:
         }
     }
 
-    async def fake_request_text(scan_source, url, *, throttle, conditional=True):  # noqa: ANN001
+    async def fake_request_text(scan_source, url, *, throttle, conditional=True, cancel_requested=None):  # noqa: ANN001
         return FakeResponse(_indeed_page(page))
 
     captured_batches: list[list[str]] = []
 
-    async def fake_enrich(jobs, scan_source, *, throttle):  # noqa: ANN001
+    async def fake_enrich(jobs, scan_source, *, throttle, cancel_requested=None):  # noqa: ANN001
         captured_batches.append([job["external_id"] for job in jobs])
 
     fetcher._request_text = fake_request_text  # type: ignore[method-assign]
     fetcher._enrich_detail_pages = fake_enrich  # type: ignore[method-assign]
-    async def fake_dynamic_html(scan_source, url, *, progress_callback=None):  # noqa: ANN001
+    async def fake_dynamic_html(scan_source, url, *, progress_callback=None, cancel_requested=None):  # noqa: ANN001
         return None
 
     fetcher._fetch_dynamic_html = fake_dynamic_html  # type: ignore[method-assign]
@@ -182,16 +182,16 @@ def test_scan_source_emits_progress_and_records_metrics() -> None:
     page = _job_payloads("first", 2)
     progress_events: list[dict] = []
 
-    async def fake_request_text(scan_source, url, *, throttle, conditional=True):  # noqa: ANN001
+    async def fake_request_text(scan_source, url, *, throttle, conditional=True, cancel_requested=None):  # noqa: ANN001
         return FakeResponse(_indeed_page(page))
 
-    async def fake_enrich(jobs, scan_source, *, throttle):  # noqa: ANN001
+    async def fake_enrich(jobs, scan_source, *, throttle, cancel_requested=None):  # noqa: ANN001
         for job in jobs:
             job["description"] = f"Detailed {job['title']}"
 
     fetcher._request_text = fake_request_text  # type: ignore[method-assign]
     fetcher._enrich_detail_pages = fake_enrich  # type: ignore[method-assign]
-    async def fake_dynamic_html(scan_source, url, *, progress_callback=None):  # noqa: ANN001
+    async def fake_dynamic_html(scan_source, url, *, progress_callback=None, cancel_requested=None):  # noqa: ANN001
         return None
 
     fetcher._fetch_dynamic_html = fake_dynamic_html  # type: ignore[method-assign]
@@ -224,15 +224,15 @@ def test_scan_source_falls_back_to_playwright_after_403() -> None:
     fetcher = JobFetcher(JobNormalizer())
     progress_events: list[dict] = []
 
-    async def fake_request_text(scan_source, url, *, throttle, conditional=True):  # noqa: ANN001
+    async def fake_request_text(scan_source, url, *, throttle, conditional=True, cancel_requested=None):  # noqa: ANN001
         request = httpx.Request("GET", url)
         response = httpx.Response(403, request=request)
         raise httpx.HTTPStatusError("Forbidden", request=request, response=response)
 
-    async def fake_dynamic_html(scan_source, url: str, *, progress_callback=None) -> str | None:  # noqa: ANN001
+    async def fake_dynamic_html(scan_source, url: str, *, progress_callback=None, cancel_requested=None) -> str | None:  # noqa: ANN001
         return _indeed_page(_job_payloads("dynamic", 2))
 
-    async def fake_enrich(jobs, scan_source, *, throttle):  # noqa: ANN001
+    async def fake_enrich(jobs, scan_source, *, throttle, cancel_requested=None):  # noqa: ANN001
         for job in jobs:
             job["description"] = f"Detailed {job['title']}"
 
@@ -267,12 +267,12 @@ def test_scan_source_marks_security_check_as_blocked() -> None:
     )
     fetcher = JobFetcher(JobNormalizer())
 
-    async def fake_request_text(scan_source, url, *, throttle, conditional=True):  # noqa: ANN001
+    async def fake_request_text(scan_source, url, *, throttle, conditional=True, cancel_requested=None):  # noqa: ANN001
         request = httpx.Request("GET", url)
         response = httpx.Response(403, request=request)
         raise httpx.HTTPStatusError("Forbidden", request=request, response=response)
 
-    async def fake_dynamic_html(scan_source, url: str, *, progress_callback=None) -> str | None:  # noqa: ANN001
+    async def fake_dynamic_html(scan_source, url: str, *, progress_callback=None, cancel_requested=None) -> str | None:  # noqa: ANN001
         return """
         <html>
           <head><title>Just a moment...</title></head>
@@ -302,6 +302,71 @@ def test_sanitize_source_url_strips_indeed_challenge_parameters() -> None:
     )
 
     assert sanitize_source_url(url, "indeed") == "https://www.indeed.com/jobs?l=Remote&q=system+administrator"
+
+
+def test_scan_source_returns_cancelled_when_requested() -> None:
+    source = JobSourceConfig(
+        id=6,
+        name="Indeed Search",
+        source_type="indeed",
+        url="https://example.com/jobs",
+        max_pages=1,
+        request_delay_ms=0,
+    )
+    fetcher = JobFetcher(JobNormalizer())
+    request_attempted = False
+
+    async def fake_request_text(scan_source, url, *, throttle, conditional=True, cancel_requested=None):  # noqa: ANN001
+        nonlocal request_attempted
+        request_attempted = True
+        return FakeResponse(_indeed_page(_job_payloads("cancel", 1)))
+
+    fetcher._request_text = fake_request_text  # type: ignore[method-assign]
+
+    result = asyncio.run(
+        fetcher.scan_source(
+            source,
+            max_jobs=20,
+            known_jobs={},
+            cancel_requested=lambda: True,
+        )
+    )
+
+    assert result.status == "cancelled"
+    assert result.error == "Cancelled by user."
+    assert request_attempted is False
+
+
+def test_indeed_detail_enrichment_skips_browser_fallback_after_block() -> None:
+    source = JobSourceConfig(
+        id=7,
+        name="Indeed Search",
+        source_type="indeed",
+        url="https://example.com/jobs",
+        max_pages=1,
+        request_delay_ms=0,
+        use_browser_profile=True,
+    )
+    fetcher = JobFetcher(JobNormalizer())
+    dynamic_attempts = 0
+    jobs = [{"url": "https://example.com/viewjob?jk=abc123", "_requires_detail": True}]
+
+    async def fake_request_text(scan_source, url, *, throttle, conditional=True, cancel_requested=None):  # noqa: ANN001
+        request = httpx.Request("GET", url)
+        response = httpx.Response(403, request=request)
+        raise httpx.HTTPStatusError("Forbidden", request=request, response=response)
+
+    async def fake_dynamic_html(scan_source, url, *, progress_callback=None, cancel_requested=None):  # noqa: ANN001
+        nonlocal dynamic_attempts
+        dynamic_attempts += 1
+        return "<html></html>"
+
+    fetcher._request_text = fake_request_text  # type: ignore[method-assign]
+    fetcher._fetch_dynamic_html = fake_dynamic_html  # type: ignore[method-assign]
+
+    asyncio.run(fetcher._enrich_detail_pages(jobs, source, throttle=SourceThrottle(0)))
+
+    assert dynamic_attempts == 0
 
 
 def test_engine_deduplicates_cross_source_jobs_by_canonical_url() -> None:

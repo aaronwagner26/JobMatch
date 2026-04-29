@@ -8,6 +8,8 @@ data/jobmatch.sqlite3
 data/uploads/*
 data/exports/*
 data/logs/*
+data/browser_profiles/*
 !data/uploads/.gitkeep
 !data/exports/.gitkeep
 !data/logs/.gitkeep
+!data/browser_profiles/.gitkeep

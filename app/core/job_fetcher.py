@@ -52,6 +52,10 @@ class SourceBlockedError(RuntimeError):
         self.reason = reason
 
 
+class ScanCancelledError(RuntimeError):
+    pass
+
+
 class SourceThrottle:
     def __init__(self, delay_ms: int) -> None:
         self.delay_seconds = max(delay_ms, 0) / 1000
@@ -80,6 +84,7 @@ class JobFetcher:
         max_jobs: int = 120,
         known_jobs: dict[str, dict[str, Any]] | None = None,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
+        cancel_requested: Callable[[], bool] | None = None,
     ) -> ScanResult:
         source_type = self._determine_source_type(source)
         source.source_type = source_type
@@ -87,6 +92,7 @@ class JobFetcher:
         throttle = SourceThrottle(source.request_delay_ms)
         diagnostics = {"pages_scanned": 0, "detail_pages_fetched": 0, "stopped_early": False}
         try:
+            self._raise_if_cancelled(cancel_requested)
             raw_jobs, etag, last_modified, not_modified = await self._fetch_jobs(
                 source,
                 source_type,
@@ -95,6 +101,7 @@ class JobFetcher:
                 throttle=throttle,
                 progress_callback=progress_callback,
                 diagnostics=diagnostics,
+                cancel_requested=cancel_requested,
             )
             if not_modified:
                 return ScanResult(
@@ -123,6 +130,14 @@ class JobFetcher:
                 detail_pages_fetched=int(diagnostics["detail_pages_fetched"]),
                 stopped_early=bool(diagnostics["stopped_early"]),
             )
+        except ScanCancelledError:
+            logger.info("Source scan cancelled for %s", source.name)
+            return self.cancelled_result(
+                source,
+                pages_scanned=int(diagnostics["pages_scanned"]),
+                detail_pages_fetched=int(diagnostics["detail_pages_fetched"]),
+                stopped_early=bool(diagnostics["stopped_early"]),
+            )
         except SourceBlockedError as exc:
             logger.info("Source scan blocked for %s: %s", source.name, exc)
             return ScanResult(
@@ -145,6 +160,23 @@ class JobFetcher:
                 stopped_early=bool(diagnostics["stopped_early"]),
             )
 
+    @staticmethod
+    def cancelled_result(
+        source: JobSourceConfig,
+        *,
+        pages_scanned: int = 0,
+        detail_pages_fetched: int = 0,
+        stopped_early: bool = False,
+    ) -> ScanResult:
+        return ScanResult(
+            source=source,
+            status="cancelled",
+            error="Cancelled by user.",
+            pages_scanned=pages_scanned,
+            detail_pages_fetched=detail_pages_fetched,
+            stopped_early=stopped_early,
+        )
+
     async def _fetch_jobs(
         self,
         source: JobSourceConfig,
@@ -155,11 +187,22 @@ class JobFetcher:
         throttle: SourceThrottle,
         progress_callback: Callable[[dict[str, Any]], None] | None,
         diagnostics: dict[str, Any],
+        cancel_requested: Callable[[], bool] | None = None,
     ) -> tuple[list[dict[str, Any]], str | None, str | None, bool]:
         if source_type == "greenhouse":
-            return await self._fetch_greenhouse(source, throttle, diagnostics=diagnostics)
+            return await self._fetch_greenhouse(
+                source,
+                throttle,
+                diagnostics=diagnostics,
+                cancel_requested=cancel_requested,
+            )
         if source_type == "lever":
-            return await self._fetch_lever(source, throttle, diagnostics=diagnostics)
+            return await self._fetch_lever(
+                source,
+                throttle,
+                diagnostics=diagnostics,
+                cancel_requested=cancel_requested,
+            )
         if source_type == "indeed":
             return await self._fetch_search_page(
                 source,
@@ -169,6 +212,7 @@ class JobFetcher:
                 throttle=throttle,
                 progress_callback=progress_callback,
                 diagnostics=diagnostics,
+                cancel_requested=cancel_requested,
             )
         if source_type == "clearance":
             return await self._fetch_search_page(
@@ -179,6 +223,7 @@ class JobFetcher:
                 throttle=throttle,
                 progress_callback=progress_callback,
                 diagnostics=diagnostics,
+                cancel_requested=cancel_requested,
             )
         return await self._fetch_search_page(
             source,
@@ -188,6 +233,7 @@ class JobFetcher:
             throttle=throttle,
             progress_callback=progress_callback,
             diagnostics=diagnostics,
+            cancel_requested=cancel_requested,
         )
 
     async def _fetch_greenhouse(
@@ -196,13 +242,20 @@ class JobFetcher:
         throttle: SourceThrottle,
         *,
         diagnostics: dict[str, Any],
+        cancel_requested: Callable[[], bool] | None = None,
     ) -> tuple[list[dict[str, Any]], str | None, str | None, bool]:
+        self._raise_if_cancelled(cancel_requested)
         diagnostics["pages_scanned"] = 1
         identifier = source.identifier or self._extract_greenhouse_identifier(source.url)
         if not identifier:
             raise ValueError("Greenhouse source requires a board token or board URL.")
         endpoint = f"https://boards-api.greenhouse.io/v1/boards/{identifier}/jobs?content=true"
-        payload, response = await self._request_json(source, endpoint, throttle=throttle)
+        payload, response = await self._request_json(
+            source,
+            endpoint,
+            throttle=throttle,
+            cancel_requested=cancel_requested,
+        )
         jobs = []
         for item in payload.get("jobs", []):
             jobs.append(
@@ -225,13 +278,20 @@ class JobFetcher:
         throttle: SourceThrottle,
         *,
         diagnostics: dict[str, Any],
+        cancel_requested: Callable[[], bool] | None = None,
     ) -> tuple[list[dict[str, Any]], str | None, str | None, bool]:
+        self._raise_if_cancelled(cancel_requested)
         diagnostics["pages_scanned"] = 1
         identifier = source.identifier or self._extract_lever_identifier(source.url)
         if not identifier:
             raise ValueError("Lever source requires a company slug or postings URL.")
         endpoint = f"https://api.lever.co/v0/postings/{identifier}?mode=json"
-        payload, response = await self._request_json(source, endpoint, throttle=throttle)
+        payload, response = await self._request_json(
+            source,
+            endpoint,
+            throttle=throttle,
+            cancel_requested=cancel_requested,
+        )
         jobs = []
         for item in payload:
             categories = item.get("categories") or {}
@@ -265,6 +325,7 @@ class JobFetcher:
         throttle: SourceThrottle,
         progress_callback: Callable[[dict[str, Any]], None] | None,
         diagnostics: dict[str, Any],
+        cancel_requested: Callable[[], bool] | None = None,
     ) -> tuple[list[dict[str, Any]], str | None, str | None, bool]:
         url = sanitize_source_url(source.url, source.source_type)
         first_response: httpx.Response | None = None
@@ -277,13 +338,19 @@ class JobFetcher:
         max_pages = max(1, source.max_pages)
 
         while url and page_number < max_pages and len(all_jobs) < max_jobs:
+            self._raise_if_cancelled(cancel_requested)
             page_number += 1
             diagnostics["pages_scanned"] = page_number
             page_jobs: list[dict[str, Any]] = []
             next_url: str | None = None
             used_dynamic_fallback = False
             try:
-                response = await self._request_text(source, url, throttle=throttle)
+                response = await self._request_text(
+                    source,
+                    url,
+                    throttle=throttle,
+                    cancel_requested=cancel_requested,
+                )
                 if page_number == 1 and response.status_code == 304:
                     return [], response.headers.get("etag"), response.headers.get("last-modified"), True
                 first_response = first_response or response
@@ -309,7 +376,12 @@ class JobFetcher:
                     page=page_number,
                     reason=reason,
                 )
-                dynamic_html = await self._fetch_dynamic_html(source, url, progress_callback=progress_callback)
+                dynamic_html = await self._fetch_dynamic_html(
+                    source,
+                    url,
+                    progress_callback=progress_callback,
+                    cancel_requested=cancel_requested,
+                )
                 if not dynamic_html:
                     raise RuntimeError(
                         f"{source.name} was blocked by {reason}, and browser fallback could not recover the page."
@@ -325,7 +397,12 @@ class JobFetcher:
                     ) from exc
 
             if (source.use_playwright or not page_jobs) and not used_dynamic_fallback and parser in {"indeed", "clearance", "generic"}:
-                dynamic_html = await self._fetch_dynamic_html(source, source.url if page_number == 1 else url, progress_callback=progress_callback)
+                dynamic_html = await self._fetch_dynamic_html(
+                    source,
+                    source.url if page_number == 1 else url,
+                    progress_callback=progress_callback,
+                    cancel_requested=cancel_requested,
+                )
                 if dynamic_html:
                     if self._looks_like_security_check(dynamic_html):
                         raise SourceBlockedError(
@@ -356,6 +433,7 @@ class JobFetcher:
 
             jobs_requiring_detail = [job for job in prepared_jobs if job.get("_requires_detail")]
             if remaining_detail_budget > 0 and jobs_requiring_detail:
+                self._raise_if_cancelled(cancel_requested)
                 detail_batch = jobs_requiring_detail[:remaining_detail_budget]
                 diagnostics["detail_pages_fetched"] = int(diagnostics["detail_pages_fetched"]) + len(detail_batch)
                 self._emit_progress(
@@ -366,7 +444,12 @@ class JobFetcher:
                     detail_pages=len(detail_batch),
                     page=page_number,
                 )
-                await self._enrich_detail_pages(detail_batch, source, throttle=throttle)
+                await self._enrich_detail_pages(
+                    detail_batch,
+                    source,
+                    throttle=throttle,
+                    cancel_requested=cancel_requested,
+                )
                 remaining_detail_budget = max(0, remaining_detail_budget - len(detail_batch))
 
             all_jobs.extend(prepared_jobs)
@@ -629,27 +712,41 @@ class JobFetcher:
         source: JobSourceConfig,
         *,
         throttle: SourceThrottle,
+        cancel_requested: Callable[[], bool] | None = None,
     ) -> None:
         candidates = [job for job in jobs if job.get("url") and job.get("_requires_detail")]
         if not candidates:
             return
+        self._raise_if_cancelled(cancel_requested)
         semaphore = asyncio.Semaphore(DEFAULT_DETAIL_FETCH_CONCURRENCY)
+        allow_dynamic_detail_fallback = self._determine_source_type(source) not in {"indeed"} and not source.use_browser_profile
 
         async def enrich(job: dict[str, Any]) -> None:
             async with semaphore:
+                self._raise_if_cancelled(cancel_requested)
                 try:
-                    response = await self._request_text(source, job["url"], throttle=throttle, conditional=False)
+                    response = await self._request_text(
+                        source,
+                        job["url"],
+                        throttle=throttle,
+                        conditional=False,
+                        cancel_requested=cancel_requested,
+                    )
                     soup = BeautifulSoup(response.text, "html.parser")
                 except httpx.HTTPStatusError as exc:
                     status_code = exc.response.status_code if exc.response is not None else None
-                    if status_code not in {403, 429}:
+                    if status_code not in {403, 429} or not allow_dynamic_detail_fallback:
                         return
                     logger.info(
                         "Falling back to Playwright for detail page %s after HTTP %s",
                         job["url"],
                         status_code,
                     )
-                    dynamic_html = await self._fetch_dynamic_html(source, job["url"])
+                    dynamic_html = await self._fetch_dynamic_html(
+                        source,
+                        job["url"],
+                        cancel_requested=cancel_requested,
+                    )
                     if not dynamic_html:
                         return
                     if self._looks_like_security_check(dynamic_html):
@@ -673,8 +770,14 @@ class JobFetcher:
         url: str,
         *,
         throttle: SourceThrottle,
+        cancel_requested: Callable[[], bool] | None = None,
     ) -> tuple[Any, httpx.Response]:
-        response = await self._request_text(source, url, throttle=throttle)
+        response = await self._request_text(
+            source,
+            url,
+            throttle=throttle,
+            cancel_requested=cancel_requested,
+        )
         if response.status_code == 304:
             return {}, response
         response.raise_for_status()
@@ -687,6 +790,7 @@ class JobFetcher:
         *,
         throttle: SourceThrottle,
         conditional: bool = True,
+        cancel_requested: Callable[[], bool] | None = None,
     ) -> httpx.Response:
         headers = dict(DEFAULT_HEADERS)
         headers.update(source.headers)
@@ -698,7 +802,9 @@ class JobFetcher:
 
         last_error: Exception | None = None
         for attempt in range(DEFAULT_REQUEST_MAX_RETRIES + 1):
+            self._raise_if_cancelled(cancel_requested)
             await throttle.wait()
+            self._raise_if_cancelled(cancel_requested)
             try:
                 async with httpx.AsyncClient(timeout=DEFAULT_HTTP_TIMEOUT, follow_redirects=True, headers=headers) as client:
                     response = await client.get(url)
@@ -706,13 +812,13 @@ class JobFetcher:
                 last_error = exc
                 if attempt >= DEFAULT_REQUEST_MAX_RETRIES:
                     raise
-                await self._sleep_with_backoff(source, attempt)
+                await self._sleep_with_backoff(source, attempt, cancel_requested=cancel_requested)
                 continue
 
             if response.status_code in {200, 304}:
                 return response
             if response.status_code in RETRYABLE_STATUS_CODES and attempt < DEFAULT_REQUEST_MAX_RETRIES:
-                await self._sleep_with_backoff(source, attempt)
+                await self._sleep_with_backoff(source, attempt, cancel_requested=cancel_requested)
                 continue
             response.raise_for_status()
 
@@ -732,9 +838,17 @@ class JobFetcher:
         except Exception:
             logger.debug("Ignoring scan progress callback failure.", exc_info=True)
 
-    async def _sleep_with_backoff(self, source: JobSourceConfig, attempt: int) -> None:
+    async def _sleep_with_backoff(
+        self,
+        source: JobSourceConfig,
+        attempt: int,
+        *,
+        cancel_requested: Callable[[], bool] | None = None,
+    ) -> None:
+        self._raise_if_cancelled(cancel_requested)
         base_delay = max(source.request_delay_ms, 250) / 1000
         await asyncio.sleep(base_delay * (DEFAULT_REQUEST_BACKOFF_MULTIPLIER ** attempt))
+        self._raise_if_cancelled(cancel_requested)
 
     async def _fetch_dynamic_html(
         self,
@@ -742,7 +856,9 @@ class JobFetcher:
         url: str,
         *,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
+        cancel_requested: Callable[[], bool] | None = None,
     ) -> str | None:
+        self._raise_if_cancelled(cancel_requested)
         try:
             from playwright.async_api import TimeoutError as PlaywrightTimeoutError
             from playwright.async_api import async_playwright
@@ -806,7 +922,12 @@ class JobFetcher:
                         break
                 await page.wait_for_timeout(1200)
                 if source.use_browser_profile:
-                    html = await self._wait_for_manual_browser_clearance(source, page, progress_callback)
+                    html = await self._wait_for_manual_browser_clearance(
+                        source,
+                        page,
+                        progress_callback,
+                        cancel_requested=cancel_requested,
+                    )
                 else:
                     html = await page.content()
                 await context.close()
@@ -820,6 +941,7 @@ class JobFetcher:
         source: JobSourceConfig,
         page,
         progress_callback: Callable[[dict[str, Any]], None] | None,
+        cancel_requested: Callable[[], bool] | None = None,
     ) -> str:
         html = await page.content()
         if not self._looks_like_security_check(html):
@@ -833,11 +955,17 @@ class JobFetcher:
         )
         deadline = time.monotonic() + DEFAULT_BROWSER_CHALLENGE_WAIT_SECONDS
         while time.monotonic() < deadline:
+            self._raise_if_cancelled(cancel_requested)
             await page.wait_for_timeout(2000)
             html = await page.content()
             if not self._looks_like_security_check(html):
                 return html
         return html
+
+    @staticmethod
+    def _raise_if_cancelled(cancel_requested: Callable[[], bool] | None) -> None:
+        if cancel_requested is not None and cancel_requested():
+            raise ScanCancelledError("Cancelled by user.")
 
     @staticmethod
     def _browser_profile_dir(source: JobSourceConfig) -> Path:
