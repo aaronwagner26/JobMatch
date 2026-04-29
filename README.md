@@ -28,6 +28,8 @@ Daily use after `git pull`:
 powershell -ExecutionPolicy Bypass -File .\run_jobmatch.ps1
 ```
 
+The launcher script runs from the repo folder automatically and will trigger setup on first launch if Python 3.12 does not have the required packages yet.
+
 To use a different port:
 
 ```powershell
