@@ -20,6 +20,8 @@ One-time setup on a new machine:
 powershell -ExecutionPolicy Bypass -File .\setup_jobmatch.ps1
 ```
 
+If that machine already has the dependencies installed, you do not need to rerun setup for normal restarts.
+
 Daily use after `git pull`:
 
 ```powershell
