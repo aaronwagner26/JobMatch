@@ -1,6 +1,30 @@
 $ErrorActionPreference = "Stop"
 $RepoRoot = $PSScriptRoot
 
+function Test-Python312Command {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]]$Arguments
+    )
+
+    $stdout = [System.IO.Path]::GetTempFileName()
+    $stderr = [System.IO.Path]::GetTempFileName()
+
+    try {
+        $process = Start-Process -FilePath "py" `
+            -ArgumentList (@("-3.12") + $Arguments) `
+            -NoNewWindow `
+            -PassThru `
+            -Wait `
+            -RedirectStandardOutput $stdout `
+            -RedirectStandardError $stderr
+        return $process.ExitCode -eq 0
+    }
+    finally {
+        Remove-Item $stdout, $stderr -ErrorAction SilentlyContinue
+    }
+}
+
 Push-Location $RepoRoot
 
 try {
@@ -8,8 +32,7 @@ try {
     & py -3.12 -c "import sys; print(sys.version); print(sys.executable)"
 
     Write-Host "Checking pip availability..."
-    & py -3.12 -m pip --version *> $null
-    if ($LASTEXITCODE -ne 0) {
+    if (-not (Test-Python312Command -Arguments @("-m", "pip", "--version"))) {
         Write-Host "pip not found, bootstrapping with ensurepip..."
         & py -3.12 -m ensurepip --upgrade
     }

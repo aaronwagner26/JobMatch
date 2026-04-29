@@ -6,11 +6,34 @@ $ErrorActionPreference = "Stop"
 $RepoRoot = $PSScriptRoot
 $SetupScript = Join-Path $RepoRoot "setup_jobmatch.ps1"
 
+function Test-Python312Command {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string[]]$Arguments
+    )
+
+    $stdout = [System.IO.Path]::GetTempFileName()
+    $stderr = [System.IO.Path]::GetTempFileName()
+
+    try {
+        $process = Start-Process -FilePath "py" `
+            -ArgumentList (@("-3.12") + $Arguments) `
+            -NoNewWindow `
+            -PassThru `
+            -Wait `
+            -RedirectStandardOutput $stdout `
+            -RedirectStandardError $stderr
+        return $process.ExitCode -eq 0
+    }
+    finally {
+        Remove-Item $stdout, $stderr -ErrorAction SilentlyContinue
+    }
+}
+
 Push-Location $RepoRoot
 
 try {
-    & py -3.12 -c "import nicegui" *> $null
-    if ($LASTEXITCODE -ne 0) {
+    if (-not (Test-Python312Command -Arguments @("-c", "import nicegui"))) {
         Write-Host "JobMatch dependencies not found. Running setup..."
         & $SetupScript
     }
