@@ -7,7 +7,10 @@ import logging
 import os
 import time
 import re
+import subprocess
+import webbrowser
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -78,6 +81,95 @@ class SourceThrottle:
 class JobFetcher:
     def __init__(self, normalizer: JobNormalizer) -> None:
         self.normalizer = normalizer
+
+    def determine_source_type(self, source: JobSourceConfig) -> str:
+        return self._determine_source_type(source)
+
+    def open_source_in_browser_profile(self, source: JobSourceConfig) -> str:
+        browser_source = source if source.use_browser_profile else replace(source, use_browser_profile=True)
+        options, browser_label = self._persistent_browser_launch_options()
+        source_url = sanitize_source_url(browser_source.url, browser_source.source_type)
+        executable = options.get("executable_path")
+        if executable:
+            profile_dir = self._browser_profile_dir(browser_source)
+            profile_dir.mkdir(parents=True, exist_ok=True)
+            subprocess.Popen(
+                [
+                    executable,
+                    f"--user-data-dir={profile_dir}",
+                    "--new-window",
+                    source_url,
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            return browser_label or Path(executable).stem
+        webbrowser.open(source_url)
+        return "default browser"
+
+    async def import_source_page(
+        self,
+        source: JobSourceConfig,
+        *,
+        known_jobs: dict[str, dict[str, Any]] | None = None,
+        max_jobs: int = 120,
+    ) -> ScanResult:
+        source_type = self._determine_source_type(source)
+        source.source_type = source_type
+        source.url = sanitize_source_url(source.url, source_type)
+        html = await self._capture_source_page_html(source, parser=self._parser_name_for_source_type(source_type))
+        jobs = self._normalize_payloads(source, self._manual_prepared_payloads(source, html, known_jobs), max_jobs=max_jobs)
+        return ScanResult(source=source, status="manual_import", jobs=jobs, pages_scanned=1)
+
+    def import_saved_html(
+        self,
+        source: JobSourceConfig,
+        html_text: str,
+        *,
+        max_jobs: int = 120,
+    ) -> ScanResult:
+        source_type = self._determine_source_type(source)
+        source.source_type = source_type
+        source.url = sanitize_source_url(source.url, source_type)
+        jobs = self._normalize_payloads(
+            source,
+            self._manual_prepared_payloads(source, html_text, known_jobs=None),
+            max_jobs=max_jobs,
+        )
+        return ScanResult(source=source, status="manual_import", jobs=jobs, pages_scanned=1)
+
+    async def import_job_urls(self, source: JobSourceConfig, urls: list[str]) -> ScanResult:
+        source_type = self._determine_source_type(source)
+        source.source_type = source_type
+        source.url = sanitize_source_url(source.url, source_type)
+        throttle = SourceThrottle(source.request_delay_ms)
+        normalized_jobs: list[NormalizedJob] = []
+        if source.use_browser_profile:
+            try:
+                from playwright.async_api import async_playwright
+            except Exception as exc:
+                raise RuntimeError("Playwright is required for browser-profile URL imports.") from exc
+            async with async_playwright() as playwright:
+                context, page = await self._open_browser_context(playwright, source)
+                try:
+                    for url in urls:
+                        html = await self._navigate_and_capture_browser_html(page, source, sanitize_source_url(url, source_type))
+                        payload = self._parse_job_detail_payload(html, sanitize_source_url(url, source_type), source)
+                        if payload is None:
+                            continue
+                        normalized_jobs.extend(self._normalize_payloads(source, [payload], max_jobs=1))
+                finally:
+                    await context.close()
+        else:
+            for url in urls:
+                html = await self._fetch_job_url_html(source, sanitize_source_url(url, source_type), throttle=throttle)
+                if not html:
+                    continue
+                payload = self._parse_job_detail_payload(html, sanitize_source_url(url, source_type), source)
+                if payload is None:
+                    continue
+                normalized_jobs.extend(self._normalize_payloads(source, [payload], max_jobs=1))
+        return ScanResult(source=source, status="manual_import", jobs=normalized_jobs, pages_scanned=len(urls))
 
     async def scan_source(
         self,
@@ -654,6 +746,122 @@ class JobFetcher:
 
         return all_jobs[:max_jobs], None, None, False
 
+    async def _capture_source_page_html(self, source: JobSourceConfig, *, parser: str) -> str:
+        source_url = sanitize_source_url(source.url, source.source_type)
+        if source.use_browser_profile or parser == "indeed":
+            html = await self._fetch_dynamic_html(source, source_url)
+            if not html:
+                raise RuntimeError(f"Could not capture {source.name} in the browser profile.")
+            return html
+
+        throttle = SourceThrottle(source.request_delay_ms)
+        try:
+            response = await self._request_text(source, source_url, throttle=throttle, conditional=False)
+            return response.text
+        except httpx.HTTPStatusError as exc:
+            status_code = exc.response.status_code if exc.response is not None else None
+            if not self._should_try_dynamic_fallback(parser, status_code):
+                raise
+            html = await self._fetch_dynamic_html(source, source_url)
+            if not html:
+                raise RuntimeError(f"Could not capture {source.name} after HTTP {status_code}.") from exc
+            return html
+
+    def _manual_prepared_payloads(
+        self,
+        source: JobSourceConfig,
+        html: str,
+        known_jobs: dict[str, dict[str, Any]] | None,
+    ) -> list[dict[str, Any]]:
+        parser = self._parser_name_for_source_type(self._determine_source_type(source))
+        payloads, _ = self._parse_html_jobs(html, source.url, parser=parser)
+        if not known_jobs:
+            return payloads
+        return [self._prepare_payload(source, payload, known_jobs) for payload in payloads]
+
+    def _normalize_payloads(
+        self,
+        source: JobSourceConfig,
+        payloads: list[dict[str, Any]],
+        *,
+        max_jobs: int,
+    ) -> list[NormalizedJob]:
+        normalized_jobs: list[NormalizedJob] = []
+        for payload in payloads[:max_jobs]:
+            try:
+                normalized_jobs.append(self.normalizer.normalize(source, payload))
+            except Exception as exc:
+                logger.warning("Skipping malformed manual-import job from %s: %s", source.name, exc)
+        return normalized_jobs
+
+    async def _fetch_job_url_html(
+        self,
+        source: JobSourceConfig,
+        url: str,
+        *,
+        throttle: SourceThrottle,
+    ) -> str | None:
+        try:
+            response = await self._request_text(source, url, throttle=throttle, conditional=False)
+            return response.text
+        except httpx.HTTPStatusError as exc:
+            status_code = exc.response.status_code if exc.response is not None else None
+            if status_code not in {403, 429}:
+                raise
+            return await self._fetch_dynamic_html(source, url)
+
+    def _parse_job_detail_payload(self, html: str, url: str, source: JobSourceConfig) -> dict[str, Any] | None:
+        soup = BeautifulSoup(html, "html.parser")
+        json_ld_jobs = self._extract_json_ld_jobs(soup, url)
+        if json_ld_jobs:
+            payload = dict(json_ld_jobs[0])
+            payload["url"] = payload.get("url") or url
+            return payload
+
+        primary = soup.select_one(
+            ".jobsearch-JobComponent-description, .jobsearch-jobDescriptionText, .jobDescriptionText, article, main, [role='main'], .posting, .job-description"
+        )
+        description = normalize_whitespace(primary.get_text(" ")) if primary else ""
+        title = self._first_text(
+            soup,
+            [
+                "h1",
+                "[data-testid='jobsearch-JobInfoHeader-title']",
+                "[data-testid='viewJobTitle']",
+                "[itemprop='title']",
+            ],
+        )
+        if not title:
+            title = normalize_whitespace((soup.title.string if soup.title and soup.title.string else ""))
+        if not title:
+            return None
+        return {
+            "raw_id": url,
+            "title": title,
+            "company": self._first_text(
+                soup,
+                [
+                    ".companyName",
+                    "[data-testid='inlineHeader-companyName']",
+                    "[data-company-name='true']",
+                    ".jobsearch-CompanyInfoContainer a",
+                    "[itemprop='hiringOrganization']",
+                ],
+            ),
+            "location": self._first_text(
+                soup,
+                [
+                    ".companyLocation",
+                    "[data-testid='inlineHeader-companyLocation']",
+                    "[data-testid='job-location']",
+                    "[itemprop='jobLocation']",
+                ],
+            ),
+            "description": description,
+            "url": url,
+            "posted_at": self._first_text(soup, [".date", "[data-testid='myJobsStateDate']", "time"]),
+        }
+
     def _prepare_payload(
         self,
         source: JobSourceConfig,
@@ -1220,6 +1428,14 @@ class JobFetcher:
         if source.use_browser_profile and parser == "indeed":
             return 0
         return DEFAULT_DETAIL_FETCH_LIMIT
+
+    @staticmethod
+    def _parser_name_for_source_type(source_type: str) -> str:
+        if source_type == "indeed":
+            return "indeed"
+        if source_type == "clearance":
+            return "clearance"
+        return "generic"
 
     @staticmethod
     def _should_try_dynamic_fallback(parser: str, status_code: int | None) -> bool:

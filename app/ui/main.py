@@ -161,6 +161,7 @@ class UIState:
     scan_log_lines: list[str] = field(default_factory=list)
     recent_scans: list[dict[str, Any]] = field(default_factory=list)
     selected_source_id: int | None = None
+    manual_job_urls: str = ""
     source_form: dict[str, Any] = field(
         default_factory=lambda: {
             "id": None,
@@ -388,6 +389,7 @@ class JobMatchUI:
     def render_sources(self) -> None:
         sources = self.engine.list_sources()
         selected_source = next((source for source in sources if source.id == self.state.selected_source_id), None)
+        manual_assist = bool(selected_source and self.engine.is_manual_assist_source(selected_source))
         with ui.column().classes("w-full gap-4"):
             with ui.row().classes("w-full items-end justify-between"):
                 with ui.column().classes("gap-1"):
@@ -444,6 +446,36 @@ class JobMatchUI:
                     self.source_inputs["notes"] = ui.textarea("Notes", value=form["notes"]).props("outlined autogrow").classes("w-full mt-3")
                     if selected_source:
                         ui.label(f"Editing source #{selected_source.id}").classes("mt-3 text-sm muted-copy")
+                        if manual_assist:
+                            ui.label(
+                                "This source is treated as manual-assist and is excluded from periodic refresh."
+                            ).classes("mt-2 muted-copy text-sm")
+                        ui.separator().classes("my-4")
+                        with ui.row().classes("w-full gap-2 items-center"):
+                            ui.button("Open In Browser", icon="open_in_new", on_click=self.open_selected_source_browser).props(
+                                "unelevated"
+                            )
+                            ui.button(
+                                "Import Source Page",
+                                icon="download_for_offline",
+                                on_click=lambda: asyncio.create_task(self.handle_manual_source_import()),
+                            ).props("flat")
+                        ui.upload(
+                            label="Upload saved HTML",
+                            auto_upload=True,
+                            on_upload=lambda e: asyncio.create_task(self.handle_source_html_upload(e)),
+                            on_rejected=lambda: ui.notify("Saved HTML upload rejected.", type="negative"),
+                        ).props("accept=.html,.htm,text/html bordered").classes("w-full mt-3")
+                        self.source_inputs["manual_job_urls"] = ui.textarea(
+                            "Paste job URLs",
+                            value=self.state.manual_job_urls,
+                            on_change=lambda e: setattr(self.state, "manual_job_urls", e.value or ""),
+                        ).props("outlined autogrow").classes("w-full mt-3")
+                        ui.button(
+                            "Import URLs",
+                            icon="link",
+                            on_click=lambda: asyncio.create_task(self.handle_job_url_import()),
+                        ).props("flat")
 
     def render_resume(self) -> None:
         resume = self.engine.get_active_resume()
@@ -493,6 +525,9 @@ class JobMatchUI:
             with ui.element("div").classes("settings-grid"):
                 with ui.element("section").classes("panel"):
                     self.settings_inputs["scheduler_enabled"] = ui.switch("Enable periodic refresh", value=bool(settings.get("scheduler_enabled", False)))
+                    ui.label("Periodic refresh skips manual-assist sources that use browser profiles or Indeed searches.").classes(
+                        "mt-2 muted-copy text-sm"
+                    )
                     self.settings_inputs["scheduler_interval_minutes"] = ui.number(
                         "Refresh interval (minutes)",
                         value=int(settings.get("scheduler_interval_minutes", 180)),
@@ -734,12 +769,14 @@ class JobMatchUI:
     def select_source(self, row: dict | None) -> None:
         if not row:
             self.state.selected_source_id = None
+            self.state.manual_job_urls = ""
             self.reset_source_form()
             return
-        source = self.engine.storage.get_source(int(row["id"]))
+        source = self.engine.get_source(int(row["id"]))
         if source is None:
             return
         self.state.selected_source_id = source.id
+        self.state.manual_job_urls = ""
         self.state.source_form = {
             "id": source.id,
             "name": source.name,
@@ -758,6 +795,7 @@ class JobMatchUI:
 
     def reset_source_form(self) -> None:
         self.state.selected_source_id = None
+        self.state.manual_job_urls = ""
         self.state.source_form = UIState().source_form
         self.render_current_view()
 
@@ -813,6 +851,16 @@ class JobMatchUI:
         self.engine.update_settings(values)
         ui.notify("Settings saved.", type="positive")
 
+    def open_selected_source_browser(self) -> None:
+        source = self._selected_source()
+        if source is None:
+            ui.notify("Select a source first.", type="warning")
+            return
+        browser_name = self.engine.open_source_in_browser_profile(source.id or 0)
+        self._append_activity(f"Opened {source.name} in the dedicated {browser_name} profile.")
+        self.render_scan_log_panel()
+        ui.notify(f"Opened in {browser_name}.", type="positive")
+
     def handle_export(self, export_format: str) -> None:
         if not self.state.matches:
             ui.notify("Nothing to export yet.", type="warning")
@@ -834,6 +882,91 @@ class JobMatchUI:
             job_type=self.state.job_type,
             clearance_terms=self.state.clearance_terms,
         )
+
+    async def handle_manual_source_import(self) -> None:
+        source = self._selected_source()
+        if source is None:
+            ui.notify("Select a source first.", type="warning")
+            return
+        self.status_label.set_text("Importing source page...")
+        self._append_activity(f"Manual import started for {source.name} from the saved source page.")
+        try:
+            result = await self.engine.import_source_page(source.id or 0)
+            self.state.recent_scans = self.engine.list_recent_scans(limit=8)
+            self._append_activity(
+                f"Manual import finished for {source.name}: {result.jobs_created} new, {result.jobs_updated} updated, {result.jobs_unchanged} unchanged."
+            )
+            await self.refresh_matches(record_activity=False)
+            ui.notify(f"Imported {len(result.jobs)} jobs from the source page.", type="positive")
+            self.render_sidebar()
+            self.render_current_view()
+        except Exception as exc:
+            self._append_activity(f"Manual source import failed for {source.name}: {exc}")
+            ui.notify(f"Manual source import failed: {exc}", type="negative")
+        finally:
+            self.status_label.set_text(self.state.scan_status if self.state.scan_running else "Ready")
+            self.render_scan_log_panel()
+
+    async def handle_source_html_upload(self, event: events.UploadEventArguments) -> None:
+        source = self._selected_source()
+        if source is None:
+            ui.notify("Select a source first.", type="warning")
+            return
+        incoming_path = UPLOADS_DIR / f"manual-source-{source.id or 0}-{safe_filename(Path(event.file.name).stem, '.html')}"
+        await event.file.save(incoming_path)
+        html_text = incoming_path.read_text(encoding="utf-8", errors="ignore")
+        self.status_label.set_text("Importing saved HTML...")
+        self._append_activity(f"Manual HTML import started for {source.name} from {event.file.name}.")
+        try:
+            result = await self.engine.import_saved_html(source.id or 0, html_text)
+            self.state.recent_scans = self.engine.list_recent_scans(limit=8)
+            self._append_activity(
+                f"Saved HTML import finished for {source.name}: {result.jobs_created} new, {result.jobs_updated} updated, {result.jobs_unchanged} unchanged."
+            )
+            await self.refresh_matches(record_activity=False)
+            ui.notify(f"Imported {len(result.jobs)} jobs from saved HTML.", type="positive")
+            self.render_sidebar()
+            self.render_current_view()
+        except Exception as exc:
+            self._append_activity(f"Saved HTML import failed for {source.name}: {exc}")
+            ui.notify(f"Saved HTML import failed: {exc}", type="negative")
+        finally:
+            self.status_label.set_text(self.state.scan_status if self.state.scan_running else "Ready")
+            self.render_scan_log_panel()
+
+    async def handle_job_url_import(self) -> None:
+        source = self._selected_source()
+        if source is None:
+            ui.notify("Select a source first.", type="warning")
+            return
+        urls = [line.strip() for line in self.state.manual_job_urls.splitlines() if line.strip()]
+        if not urls:
+            ui.notify("Paste at least one job URL.", type="warning")
+            return
+        self.status_label.set_text("Importing job URLs...")
+        self._append_activity(f"Manual URL import started for {source.name}: {len(urls)} URL(s).")
+        try:
+            result = await self.engine.import_job_urls(source.id or 0, urls)
+            self.state.recent_scans = self.engine.list_recent_scans(limit=8)
+            self._append_activity(
+                f"URL import finished for {source.name}: {result.jobs_created} new, {result.jobs_updated} updated, {result.jobs_unchanged} unchanged."
+            )
+            await self.refresh_matches(record_activity=False)
+            ui.notify(f"Imported {len(result.jobs)} jobs from pasted URLs.", type="positive")
+            self.state.manual_job_urls = ""
+            self.render_sidebar()
+            self.render_current_view()
+        except Exception as exc:
+            self._append_activity(f"URL import failed for {source.name}: {exc}")
+            ui.notify(f"URL import failed: {exc}", type="negative")
+        finally:
+            self.status_label.set_text(self.state.scan_status if self.state.scan_running else "Ready")
+            self.render_scan_log_panel()
+
+    def _selected_source(self):
+        if not self.state.selected_source_id:
+            return None
+        return self.engine.get_source(self.state.selected_source_id)
 
     def _append_activity(self, message: str) -> None:
         timestamp = datetime.now().strftime("%H:%M:%S")

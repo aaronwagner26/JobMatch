@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import csv
 import json
+from dataclasses import replace
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -11,7 +12,7 @@ from app.core.job_fetcher import JobFetcher
 from app.core.matcher import JobMatcher
 from app.core.normalizer import JobNormalizer
 from app.core.resume_parser import ResumeParser
-from app.core.types import FilterCriteria, JobSourceConfig, MatchResult, MatchWeights, ResumeProfile, ScanSummary
+from app.core.types import FilterCriteria, JobSourceConfig, MatchResult, MatchWeights, ResumeProfile, ScanResult, ScanSummary
 from app.db.storage import Storage
 from app.utils.config import DEFAULT_SCAN_CONCURRENCY, DEFAULT_SETTINGS, EXPORTS_DIR, UPLOADS_DIR, ensure_directories
 from app.utils.text import canonical_job_key, safe_filename, sanitize_source_url
@@ -43,6 +44,9 @@ class JobMatchEngine:
     def list_sources(self) -> list[JobSourceConfig]:
         return self.storage.list_sources()
 
+    def get_source(self, source_id: int) -> JobSourceConfig | None:
+        return self.storage.get_source(source_id)
+
     def save_source(self, payload: JobSourceConfig) -> JobSourceConfig:
         payload.url = sanitize_source_url(payload.url, payload.source_type)
         return self.storage.upsert_source(payload)
@@ -64,6 +68,59 @@ class JobMatchEngine:
 
     def scan_running(self) -> bool:
         return self._scan_lock.locked()
+
+    def is_manual_assist_source(self, source: JobSourceConfig) -> bool:
+        source_type = self.job_fetcher.determine_source_type(source)
+        return source.use_browser_profile or source_type == "indeed"
+
+    def open_source_in_browser_profile(self, source_id: int) -> str:
+        source = self.storage.get_source(source_id)
+        if source is None:
+            raise ValueError("Source not found.")
+        browser_source = source if source.use_browser_profile else replace(source, use_browser_profile=True)
+        return self.job_fetcher.open_source_in_browser_profile(browser_source)
+
+    async def import_source_page(self, source_id: int) -> ScanResult:
+        source = self.storage.get_source(source_id)
+        if source is None:
+            raise ValueError("Source not found.")
+        known_jobs = self.storage.get_source_job_index(source.id or 0)
+        browser_source = source if source.use_browser_profile else (
+            replace(source, use_browser_profile=True)
+            if self.job_fetcher.determine_source_type(source) == "indeed"
+            else source
+        )
+        result = await self.job_fetcher.import_source_page(
+            browser_source,
+            known_jobs=known_jobs,
+            max_jobs=int(self.get_settings().get("max_source_jobs", DEFAULT_SETTINGS["max_source_jobs"])),
+        )
+        return self._store_manual_import(source, result, status="manual_import")
+
+    async def import_saved_html(self, source_id: int, html_text: str) -> ScanResult:
+        source = self.storage.get_source(source_id)
+        if source is None:
+            raise ValueError("Source not found.")
+        result = self.job_fetcher.import_saved_html(
+            source,
+            html_text,
+            max_jobs=int(self.get_settings().get("max_source_jobs", DEFAULT_SETTINGS["max_source_jobs"])),
+        )
+        return self._store_manual_import(source, result, status="manual_import")
+
+    async def import_job_urls(self, source_id: int, urls: list[str]) -> ScanResult:
+        source = self.storage.get_source(source_id)
+        if source is None:
+            raise ValueError("Source not found.")
+        if not urls:
+            raise ValueError("Paste at least one job URL.")
+        browser_source = source if source.use_browser_profile else (
+            replace(source, use_browser_profile=True)
+            if self.job_fetcher.determine_source_type(source) == "indeed"
+            else source
+        )
+        result = await self.job_fetcher.import_job_urls(browser_source, urls)
+        return self._store_manual_import(source, result, status="manual_import")
 
     async def scan_sources(
         self,
@@ -261,7 +318,11 @@ class JobMatchEngine:
         if not settings.get("scheduler_enabled"):
             return False
         interval = int(settings.get("scheduler_interval_minutes", DEFAULT_SETTINGS["scheduler_interval_minutes"]))
-        sources = [source for source in self.storage.list_sources() if source.enabled]
+        sources = [
+            source
+            for source in self.storage.list_sources()
+            if source.enabled and not self.is_manual_assist_source(source)
+        ]
         if not sources:
             return False
         now = datetime.now(UTC)
@@ -274,6 +335,27 @@ class JobMatchEngine:
 
     def list_recent_scans(self, limit: int = 25) -> list[dict]:
         return self.storage.list_scans(limit=limit)
+
+    def _store_manual_import(self, source: JobSourceConfig, result: ScanResult, *, status: str) -> ScanResult:
+        if result.status != "manual_import":
+            return result
+        scan_id = self.storage.begin_scan(source.id)
+        created, updated, unchanged = self.storage.merge_jobs(source, result.jobs)
+        result.source = source
+        result.jobs_created = created
+        result.jobs_updated = updated
+        result.jobs_unchanged = unchanged
+        self.storage.update_source_scan_state(source.id or 0, status=status)
+        self.storage.finish_scan(
+            scan_id,
+            status=status,
+            jobs_found=len(result.jobs),
+            jobs_created=created,
+            jobs_updated=updated,
+            jobs_unchanged=unchanged,
+            jobs_deactivated=0,
+        )
+        return result
 
     def _get_matcher(self, model_name: str, weights: MatchWeights) -> JobMatcher:
         normalized = weights.normalized()

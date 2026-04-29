@@ -329,6 +329,77 @@ class Storage:
 
         return created, updated, unchanged, deactivated
 
+    def merge_jobs(self, source: JobSourceConfig, jobs: list[NormalizedJob]) -> tuple[int, int, int]:
+        created = 0
+        updated = 0
+        unchanged = 0
+
+        with self.session() as session:
+            existing_records = session.scalars(select(JobRecord).where(JobRecord.source_id == source.id)).all()
+            existing_by_external = {record.external_id: record for record in existing_records}
+            now = datetime.now(UTC)
+
+            for job in jobs:
+                record = existing_by_external.get(job.external_id)
+                if record is None:
+                    record = JobRecord(
+                        source_id=source.id or 0,
+                        external_id=job.external_id,
+                        title=job.title,
+                        company=job.company,
+                        location=job.location,
+                        remote_mode=job.remote_mode,
+                        job_type=job.job_type,
+                        clearance_terms=job.clearance_terms,
+                        posted_at=job.posted_at,
+                        url=job.url,
+                        description=job.description,
+                        summary_text=job.summary_text,
+                        skills=job.skills,
+                        required_skills=job.required_skills,
+                        preferred_skills=job.preferred_skills,
+                        experience_years=job.experience_years,
+                        employment_text=job.employment_text,
+                        metadata_json=job.metadata,
+                        content_hash=job.content_hash,
+                        embedding=job.embedding,
+                        active=True,
+                        first_seen_at=now,
+                        last_seen_at=now,
+                    )
+                    session.add(record)
+                    created += 1
+                    continue
+
+                record.last_seen_at = now
+                record.active = True
+                if record.content_hash == job.content_hash:
+                    unchanged += 1
+                    continue
+
+                record.title = job.title
+                record.company = job.company
+                record.location = job.location
+                record.remote_mode = job.remote_mode
+                record.job_type = job.job_type
+                record.clearance_terms = job.clearance_terms
+                record.posted_at = job.posted_at
+                record.url = job.url
+                record.description = job.description
+                record.summary_text = job.summary_text
+                record.skills = job.skills
+                record.required_skills = job.required_skills
+                record.preferred_skills = job.preferred_skills
+                record.experience_years = job.experience_years
+                record.employment_text = job.employment_text
+                record.metadata_json = job.metadata
+                record.content_hash = job.content_hash
+                record.embedding = job.embedding
+                record.last_updated_at = now
+                updated += 1
+
+        return created, updated, unchanged
+
     def list_jobs(self, *, active_only: bool = True, source_ids: list[int] | None = None) -> list[NormalizedJob]:
         with self.session() as session:
             query = select(JobRecord, SourceRecord).join(SourceRecord, JobRecord.source_id == SourceRecord.id)
