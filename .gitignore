@@ -1,6 +1,8 @@
 __pycache__/
 .pytest_cache/
 *.pyc
+.venv/
+*.egg-info/
 
 data/jobmatch.sqlite3
 data/uploads/*

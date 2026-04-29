@@ -678,7 +678,7 @@ def _resolve_port(port: int | None) -> int:
             return int(env_port)
         except ValueError:
             pass
-    return 8080
+    return 8181
 
 
 def _parse_args() -> argparse.Namespace:

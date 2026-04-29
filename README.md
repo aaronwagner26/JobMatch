@@ -10,7 +10,29 @@ python -m playwright install chromium
 python -m app.ui.main
 ```
 
-The UI starts on `http://127.0.0.1:8080`.
+The UI starts on `http://127.0.0.1:8181`.
+
+## Windows Workflow
+
+One-time setup on a new machine:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\setup_jobmatch.ps1
+```
+
+Daily use after `git pull`:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\run_jobmatch.ps1
+```
+
+To use a different port:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\run_jobmatch.ps1 -Port 8282
+```
+
+Because the project is installed with `-e`, code changes pulled from Git are used immediately. You only need to rerun setup when Python dependencies change, typically after edits to `pyproject.toml`.
 
 ## CLI
 
