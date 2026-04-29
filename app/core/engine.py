@@ -14,7 +14,7 @@ from app.core.resume_parser import ResumeParser
 from app.core.types import FilterCriteria, JobSourceConfig, MatchResult, MatchWeights, ResumeProfile, ScanSummary
 from app.db.storage import Storage
 from app.utils.config import DEFAULT_SCAN_CONCURRENCY, DEFAULT_SETTINGS, EXPORTS_DIR, UPLOADS_DIR, ensure_directories
-from app.utils.text import canonical_job_key, safe_filename
+from app.utils.text import canonical_job_key, safe_filename, sanitize_source_url
 
 
 class JobMatchEngine:
@@ -43,6 +43,7 @@ class JobMatchEngine:
         return self.storage.list_sources()
 
     def save_source(self, payload: JobSourceConfig) -> JobSourceConfig:
+        payload.url = sanitize_source_url(payload.url, payload.source_type)
         return self.storage.upsert_source(payload)
 
     def delete_source(self, source_id: int) -> None:
@@ -144,6 +145,7 @@ class JobMatchEngine:
                         pages_scanned=result.pages_scanned,
                         detail_pages_fetched=result.detail_pages_fetched,
                         stopped_early=result.stopped_early,
+                        block_reason=result.block_reason,
                         error=result.error,
                     )
                     return result
@@ -161,6 +163,7 @@ class JobMatchEngine:
                 total_updated=summary.total_updated,
                 total_unchanged=summary.total_unchanged,
                 total_deactivated=summary.total_deactivated,
+                blocked_count=summary.blocked_count,
                 error_count=summary.error_count,
             )
             return summary

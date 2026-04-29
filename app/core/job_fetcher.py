@@ -4,8 +4,10 @@ import asyncio
 import contextlib
 import json
 import logging
+import time
 import re
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -14,6 +16,8 @@ from bs4 import BeautifulSoup
 from app.core.normalizer import JobNormalizer
 from app.core.types import JobSourceConfig, NormalizedJob, ScanResult
 from app.utils.config import (
+    BROWSER_PROFILES_DIR,
+    DEFAULT_BROWSER_CHALLENGE_WAIT_SECONDS,
     DEFAULT_DETAIL_FETCH_CONCURRENCY,
     DEFAULT_DETAIL_FETCH_LIMIT,
     DEFAULT_EARLY_STOP_CONSECUTIVE_PAGES,
@@ -24,12 +28,28 @@ from app.utils.config import (
     DEFAULT_REQUEST_BACKOFF_MULTIPLIER,
     DEFAULT_REQUEST_MAX_RETRIES,
 )
-from app.utils.text import absolute_url, normalize_whitespace, strip_html
+from app.utils.text import absolute_url, normalize_whitespace, safe_filename, sanitize_source_url, strip_html
 
 logger = logging.getLogger(__name__)
 
 JSON_LD_JOB_POSTING = "jobposting"
 RETRYABLE_STATUS_CODES = {408, 429, 500, 502, 503, 504}
+SECURITY_CHECK_MARKERS = (
+    "additional verification required",
+    "attention required",
+    "cloudflare",
+    "enable javascript and cookies to continue",
+    "just a moment",
+    "ray id",
+    "security check - indeed.com",
+    "troubleshooting cloudflare errors",
+)
+
+
+class SourceBlockedError(RuntimeError):
+    def __init__(self, message: str, *, reason: str = "security_check") -> None:
+        super().__init__(message)
+        self.reason = reason
 
 
 class SourceThrottle:
@@ -63,6 +83,7 @@ class JobFetcher:
     ) -> ScanResult:
         source_type = self._determine_source_type(source)
         source.source_type = source_type
+        source.url = sanitize_source_url(source.url, source_type)
         throttle = SourceThrottle(source.request_delay_ms)
         diagnostics = {"pages_scanned": 0, "detail_pages_fetched": 0, "stopped_early": False}
         try:
@@ -101,6 +122,17 @@ class JobFetcher:
                 pages_scanned=int(diagnostics["pages_scanned"]),
                 detail_pages_fetched=int(diagnostics["detail_pages_fetched"]),
                 stopped_early=bool(diagnostics["stopped_early"]),
+            )
+        except SourceBlockedError as exc:
+            logger.info("Source scan blocked for %s: %s", source.name, exc)
+            return ScanResult(
+                source=source,
+                status="blocked",
+                error=str(exc),
+                pages_scanned=int(diagnostics["pages_scanned"]),
+                detail_pages_fetched=int(diagnostics["detail_pages_fetched"]),
+                stopped_early=bool(diagnostics["stopped_early"]),
+                block_reason=exc.reason,
             )
         except Exception as exc:
             logger.exception("Source scan failed for %s", source.name)
@@ -234,7 +266,7 @@ class JobFetcher:
         progress_callback: Callable[[dict[str, Any]], None] | None,
         diagnostics: dict[str, Any],
     ) -> tuple[list[dict[str, Any]], str | None, str | None, bool]:
-        url = source.url
+        url = sanitize_source_url(source.url, source.source_type)
         first_response: httpx.Response | None = None
         all_jobs: list[dict[str, Any]] = []
         seen_external_ids: set[str] = set()
@@ -257,6 +289,10 @@ class JobFetcher:
                 first_response = first_response or response
 
                 page_html = response.text
+                if self._looks_like_security_check(page_html):
+                    raise SourceBlockedError(
+                        self._security_check_message(source, parser, needs_browser_profile=not source.use_browser_profile)
+                    )
                 page_jobs, next_url = self._parse_html_jobs(page_html, url, parser=parser)
             except httpx.HTTPStatusError as exc:
                 status_code = exc.response.status_code if exc.response is not None else None
@@ -273,10 +309,14 @@ class JobFetcher:
                     page=page_number,
                     reason=reason,
                 )
-                dynamic_html = await self._fetch_dynamic_html(url)
+                dynamic_html = await self._fetch_dynamic_html(source, url, progress_callback=progress_callback)
                 if not dynamic_html:
                     raise RuntimeError(
                         f"{source.name} was blocked by {reason}, and browser fallback could not recover the page."
+                    ) from exc
+                if self._looks_like_security_check(dynamic_html):
+                    raise SourceBlockedError(
+                        self._security_check_message(source, parser, needs_browser_profile=not source.use_browser_profile)
                     ) from exc
                 page_jobs, next_url = self._parse_html_jobs(dynamic_html, url, parser=parser)
                 if not page_jobs:
@@ -285,8 +325,12 @@ class JobFetcher:
                     ) from exc
 
             if (source.use_playwright or not page_jobs) and not used_dynamic_fallback and parser in {"indeed", "clearance", "generic"}:
-                dynamic_html = await self._fetch_dynamic_html(source.url if page_number == 1 else url)
+                dynamic_html = await self._fetch_dynamic_html(source, source.url if page_number == 1 else url, progress_callback=progress_callback)
                 if dynamic_html:
+                    if self._looks_like_security_check(dynamic_html):
+                        raise SourceBlockedError(
+                            self._security_check_message(source, parser, needs_browser_profile=not source.use_browser_profile)
+                        )
                     dynamic_jobs, dynamic_next_url = self._parse_html_jobs(dynamic_html, url, parser=parser)
                     if dynamic_jobs:
                         page_jobs = dynamic_jobs
@@ -365,6 +409,7 @@ class JobFetcher:
 
             if not next_url or next_url in seen_page_urls:
                 break
+            next_url = sanitize_source_url(next_url, source.source_type)
             seen_page_urls.add(next_url)
             url = next_url
 
@@ -604,8 +649,10 @@ class JobFetcher:
                         job["url"],
                         status_code,
                     )
-                    dynamic_html = await self._fetch_dynamic_html(job["url"])
+                    dynamic_html = await self._fetch_dynamic_html(source, job["url"])
                     if not dynamic_html:
+                        return
+                    if self._looks_like_security_check(dynamic_html):
                         return
                     soup = BeautifulSoup(dynamic_html, "html.parser")
                 except Exception:
@@ -689,7 +736,13 @@ class JobFetcher:
         base_delay = max(source.request_delay_ms, 250) / 1000
         await asyncio.sleep(base_delay * (DEFAULT_REQUEST_BACKOFF_MULTIPLIER ** attempt))
 
-    async def _fetch_dynamic_html(self, url: str) -> str | None:
+    async def _fetch_dynamic_html(
+        self,
+        source: JobSourceConfig,
+        url: str,
+        *,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    ) -> str | None:
         try:
             from playwright.async_api import TimeoutError as PlaywrightTimeoutError
             from playwright.async_api import async_playwright
@@ -699,20 +752,37 @@ class JobFetcher:
 
         try:
             async with async_playwright() as playwright:
-                browser = await playwright.chromium.launch(
-                    headless=True,
-                    args=[
-                        "--disable-blink-features=AutomationControlled",
-                        "--disable-dev-shm-usage",
-                    ],
-                )
-                context = await browser.new_context(
-                    user_agent=DEFAULT_HEADERS["User-Agent"],
-                    locale="en-US",
-                    extra_http_headers={"Accept-Language": DEFAULT_HEADERS["Accept-Language"]},
-                    viewport={"width": 1440, "height": 1024},
-                )
-                page = await context.new_page()
+                if source.use_browser_profile:
+                    context = await playwright.chromium.launch_persistent_context(
+                        user_data_dir=str(self._browser_profile_dir(source)),
+                        headless=False,
+                        user_agent=DEFAULT_HEADERS["User-Agent"],
+                        locale="en-US",
+                        extra_http_headers={"Accept-Language": DEFAULT_HEADERS["Accept-Language"]},
+                        viewport={"width": 1440, "height": 1024},
+                        args=[
+                            "--disable-blink-features=AutomationControlled",
+                            "--disable-dev-shm-usage",
+                        ],
+                    )
+                    page = context.pages[0] if context.pages else await context.new_page()
+                    with contextlib.suppress(Exception):
+                        await page.bring_to_front()
+                else:
+                    browser = await playwright.chromium.launch(
+                        headless=True,
+                        args=[
+                            "--disable-blink-features=AutomationControlled",
+                            "--disable-dev-shm-usage",
+                        ],
+                    )
+                    context = await browser.new_context(
+                        user_agent=DEFAULT_HEADERS["User-Agent"],
+                        locale="en-US",
+                        extra_http_headers={"Accept-Language": DEFAULT_HEADERS["Accept-Language"]},
+                        viewport={"width": 1440, "height": 1024},
+                    )
+                    page = await context.new_page()
                 await page.add_init_script(
                     """
                     Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
@@ -735,17 +805,68 @@ class JobFetcher:
                         await page.wait_for_selector(selector, timeout=2500)
                         break
                 await page.wait_for_timeout(1200)
-                html = await page.content()
+                if source.use_browser_profile:
+                    html = await self._wait_for_manual_browser_clearance(source, page, progress_callback)
+                else:
+                    html = await page.content()
                 await context.close()
-                await browser.close()
                 return html
         except Exception as exc:
             logger.warning("Playwright fetch failed for %s: %s", url, exc)
             return None
 
+    async def _wait_for_manual_browser_clearance(
+        self,
+        source: JobSourceConfig,
+        page,
+        progress_callback: Callable[[dict[str, Any]], None] | None,
+    ) -> str:
+        html = await page.content()
+        if not self._looks_like_security_check(html):
+            return html
+        self._emit_progress(
+            progress_callback,
+            event="source_browser_assist",
+            source_id=source.id,
+            source_name=source.name,
+            wait_seconds=DEFAULT_BROWSER_CHALLENGE_WAIT_SECONDS,
+        )
+        deadline = time.monotonic() + DEFAULT_BROWSER_CHALLENGE_WAIT_SECONDS
+        while time.monotonic() < deadline:
+            await page.wait_for_timeout(2000)
+            html = await page.content()
+            if not self._looks_like_security_check(html):
+                return html
+        return html
+
+    @staticmethod
+    def _browser_profile_dir(source: JobSourceConfig) -> Path:
+        token = source.id if source.id is not None else safe_filename(source.name)
+        return BROWSER_PROFILES_DIR / f"source-{token}"
+
     @staticmethod
     def _should_try_dynamic_fallback(parser: str, status_code: int | None) -> bool:
         return parser in {"indeed", "clearance", "generic"} and status_code in {403, 429}
+
+    @staticmethod
+    def _looks_like_security_check(html: str | None) -> bool:
+        content = normalize_whitespace(html).casefold()
+        if not content:
+            return False
+        return any(marker in content for marker in SECURITY_CHECK_MARKERS)
+
+    @staticmethod
+    def _security_check_message(source: JobSourceConfig, parser: str, *, needs_browser_profile: bool) -> str:
+        label = source.name or parser.title()
+        if needs_browser_profile:
+            return (
+                f"{label} is being blocked by an Indeed/Cloudflare security check. "
+                "Enable 'Use persistent browser profile' for this source, rescan, and complete the verification in the opened browser window if prompted."
+            )
+        return (
+            f"{label} is still on the Indeed/Cloudflare security check page. "
+            "If a browser window opened, complete the verification there and run the scan again."
+        )
 
     @staticmethod
     def _determine_source_type(source: JobSourceConfig) -> str:

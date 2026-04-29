@@ -32,6 +32,7 @@ class JobSourceConfig:
     identifier: str | None = None
     enabled: bool = True
     use_playwright: bool = False
+    use_browser_profile: bool = False
     refresh_minutes: int = 180
     max_pages: int = 3
     request_delay_ms: int = 750
@@ -130,6 +131,7 @@ class ScanResult:
     pages_scanned: int = 0
     detail_pages_fetched: int = 0
     stopped_early: bool = False
+    block_reason: str | None = None
 
 
 @dataclass(slots=True)
@@ -160,4 +162,8 @@ class ScanSummary:
 
     @property
     def error_count(self) -> int:
-        return sum(1 for result in self.results if result.status == "error")
+        return sum(1 for result in self.results if result.status in {"error", "blocked"})
+
+    @property
+    def blocked_count(self) -> int:
+        return sum(1 for result in self.results if result.status == "blocked")

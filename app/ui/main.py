@@ -169,6 +169,7 @@ class UIState:
             "identifier": "",
             "enabled": True,
             "use_playwright": False,
+            "use_browser_profile": False,
             "refresh_minutes": 180,
             "max_pages": DEFAULT_SOURCE_MAX_PAGES,
             "request_delay_ms": DEFAULT_SOURCE_REQUEST_DELAY_MS,
@@ -433,6 +434,9 @@ class JobMatchUI:
                         self.source_inputs["request_delay_ms"] = ui.number("Request delay (ms)", value=form["request_delay_ms"], min=0, step=250).props("outlined")
                         self.source_inputs["enabled"] = ui.switch("Enabled", value=form["enabled"])
                         self.source_inputs["use_playwright"] = ui.switch("Use Playwright fallback", value=form["use_playwright"])
+                        self.source_inputs["use_browser_profile"] = ui.switch(
+                            "Use persistent browser profile", value=form["use_browser_profile"]
+                        )
                     self.source_inputs["notes"] = ui.textarea("Notes", value=form["notes"]).props("outlined autogrow").classes("w-full mt-3")
                     if selected_source:
                         ui.label(f"Editing source #{selected_source.id}").classes("mt-3 text-sm muted-copy")
@@ -555,7 +559,7 @@ class JobMatchUI:
                 self._stat_block("New", str(totals["created"]))
                 self._stat_block("Updated", str(totals["updated"]))
                 self._stat_block("Unchanged", str(totals["unchanged"]))
-                self._stat_block("Errors", str(totals["errors"]))
+                self._stat_block("Issues", str(totals["issues"]))
 
             if self.state.scan_rows:
                 rows = [self._scan_row_payload(row) for row in self.state.scan_rows]
@@ -716,6 +720,7 @@ class JobMatchUI:
             "identifier": source.identifier or "",
             "enabled": source.enabled,
             "use_playwright": source.use_playwright,
+            "use_browser_profile": source.use_browser_profile,
             "refresh_minutes": source.refresh_minutes,
             "max_pages": source.max_pages,
             "request_delay_ms": source.request_delay_ms,
@@ -737,6 +742,7 @@ class JobMatchUI:
             identifier=self.source_inputs["identifier"].value or None,
             enabled=bool(self.source_inputs["enabled"].value),
             use_playwright=bool(self.source_inputs["use_playwright"].value),
+            use_browser_profile=bool(self.source_inputs["use_browser_profile"].value),
             refresh_minutes=int(self.source_inputs["refresh_minutes"].value or 180),
             max_pages=max(1, int(self.source_inputs["max_pages"].value or DEFAULT_SOURCE_MAX_PAGES)),
             request_delay_ms=max(0, int(self.source_inputs["request_delay_ms"].value or DEFAULT_SOURCE_REQUEST_DELAY_MS)),
@@ -747,7 +753,20 @@ class JobMatchUI:
             return
         saved = self.engine.save_source(payload)
         self.state.selected_source_id = saved.id
-        self.state.source_form["id"] = saved.id
+        self.state.source_form = {
+            "id": saved.id,
+            "name": saved.name,
+            "source_type": saved.source_type,
+            "url": saved.url,
+            "identifier": saved.identifier or "",
+            "enabled": saved.enabled,
+            "use_playwright": saved.use_playwright,
+            "use_browser_profile": saved.use_browser_profile,
+            "refresh_minutes": saved.refresh_minutes,
+            "max_pages": saved.max_pages,
+            "request_delay_ms": saved.request_delay_ms,
+            "notes": saved.notes,
+        }
         ui.notify(f"Saved source: {saved.name}", type="positive")
         self.render_sidebar()
         self.render_current_view()
@@ -831,6 +850,13 @@ class JobMatchUI:
             row = self._touch_scan_row(event.get("source_id"), event.get("source_name"))
             row["note"] = f"Switching to browser rendering on page {event.get('page', '?')} after {event.get('reason', 'request block')}"
             self._append_activity(f"{row['source_name']}: {row['note']}.")
+        elif kind == "source_browser_assist":
+            row = self._touch_scan_row(event.get("source_id"), event.get("source_name"))
+            row["note"] = (
+                f"Waiting up to {event.get('wait_seconds', 0)}s for security-check clearance "
+                "in the persistent browser profile window"
+            )
+            self._append_activity(f"{row['source_name']}: {row['note']}.")
         elif kind == "source_early_stop":
             row = self._touch_scan_row(event.get("source_id"), event.get("source_name"))
             row["stopped_early"] = True
@@ -848,22 +874,26 @@ class JobMatchUI:
             row["detail_pages_fetched"] = int(event.get("detail_pages_fetched") or row["detail_pages_fetched"])
             row["stopped_early"] = bool(event.get("stopped_early") or row["stopped_early"])
             row["error"] = str(event.get("error") or "")
+            row["block_reason"] = str(event.get("block_reason") or "")
             row["note"] = self._source_finished_note(row)
             self.state.scan_sources_finished = sum(
-                1 for scan_row in self.state.scan_rows if scan_row["status"] in {"ok", "not_modified", "error"}
+                1 for scan_row in self.state.scan_rows if scan_row["status"] in {"ok", "not_modified", "error", "blocked"}
             )
             self.state.scan_status = f"Scanning {self.state.scan_sources_finished}/{max(self.state.scan_source_total, 1)} sources..."
-            self._append_activity(
-                f"{row['source_name']}: {row['status']} ({row['jobs_created']} new, {row['jobs_updated']} updated, {row['jobs_unchanged']} unchanged)."
-            )
+            if row["status"] == "blocked":
+                self._append_activity(f"{row['source_name']}: blocked by site security checks.")
+            else:
+                self._append_activity(
+                    f"{row['source_name']}: {row['status']} ({row['jobs_created']} new, {row['jobs_updated']} updated, {row['jobs_unchanged']} unchanged)."
+                )
         elif kind == "scan_finished":
             self.state.scan_status = (
                 f"Scan complete: {event.get('total_created', 0)} new, "
-                f"{event.get('total_updated', 0)} updated, {event.get('error_count', 0)} error(s)"
+                f"{event.get('total_updated', 0)} updated, {event.get('blocked_count', 0)} blocked, {event.get('error_count', 0)} issue(s)"
             )
             self._append_activity(
                 f"Scan complete: {event.get('total_jobs', 0)} job(s), "
-                f"{event.get('total_created', 0)} new, {event.get('total_updated', 0)} updated."
+                f"{event.get('total_created', 0)} new, {event.get('total_updated', 0)} updated, {event.get('blocked_count', 0)} blocked."
             )
 
         if self.status_label is not None:
@@ -879,7 +909,7 @@ class JobMatchUI:
     def _scan_complete_status(self, summary: ScanSummary) -> str:
         return (
             f"Scan complete: {summary.total_created} new, {summary.total_updated} updated, "
-            f"{summary.error_count} error(s)"
+            f"{summary.blocked_count} blocked, {summary.error_count} issue(s)"
         )
 
     def _scan_totals(self) -> dict[str, int]:
@@ -887,7 +917,7 @@ class JobMatchUI:
             "created": sum(int(row["jobs_created"]) for row in self.state.scan_rows),
             "updated": sum(int(row["jobs_updated"]) for row in self.state.scan_rows),
             "unchanged": sum(int(row["jobs_unchanged"]) for row in self.state.scan_rows),
-            "errors": sum(1 for row in self.state.scan_rows if row["status"] == "error"),
+            "issues": sum(1 for row in self.state.scan_rows if row["status"] in {"error", "blocked"}),
         }
 
     def _touch_scan_row(self, source_id: Any, source_name: Any) -> dict[str, Any]:
@@ -918,10 +948,13 @@ class JobMatchUI:
             "stopped_early": False,
             "note": "Waiting to start",
             "error": "",
+            "block_reason": "",
         }
 
     @staticmethod
     def _source_finished_note(row: dict[str, Any]) -> str:
+        if row["status"] == "blocked" and row["error"]:
+            return row["error"]
         if row["status"] == "error" and row["error"]:
             return row["error"]
         note = (
@@ -945,6 +978,7 @@ class JobMatchUI:
             "jobs_deactivated": result.jobs_deactivated,
             "detail_pages_fetched": result.detail_pages_fetched,
             "stopped_early": result.stopped_early,
+            "block_reason": result.block_reason or "",
             "note": result.error or self._source_finished_note(
                 {
                     "status": result.status,
@@ -953,6 +987,7 @@ class JobMatchUI:
                     "pages_scanned": result.pages_scanned,
                     "detail_pages_fetched": result.detail_pages_fetched,
                     "stopped_early": result.stopped_early,
+                    "block_reason": result.block_reason or "",
                 }
             ),
             "error": result.error or "",

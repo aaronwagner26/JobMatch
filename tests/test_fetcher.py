@@ -7,6 +7,7 @@ from app.core.engine import JobMatchEngine
 from app.core.job_fetcher import JobFetcher, SourceThrottle
 from app.core.normalizer import JobNormalizer
 from app.core.types import JobSourceConfig, NormalizedJob
+from app.utils.text import sanitize_source_url
 
 
 class FakeResponse:
@@ -65,10 +66,10 @@ def test_fetcher_paginates_and_stops_after_mostly_known_pages() -> None:
     fetcher = JobFetcher(JobNormalizer())
     page_jobs = [_job_payloads("page1", 6), _job_payloads("page2", 6), _job_payloads("page3", 6), _job_payloads("page4", 6)]
     responses = {
-        "https://example.com/jobs": _indeed_page(page_jobs[0], next_href="/jobs?page=2"),
-        "https://example.com/jobs?page=2": _indeed_page(page_jobs[1], next_href="/jobs?page=3"),
-        "https://example.com/jobs?page=3": _indeed_page(page_jobs[2], next_href="/jobs?page=4"),
-        "https://example.com/jobs?page=4": _indeed_page(page_jobs[3], next_href=None),
+        "https://example.com/jobs": _indeed_page(page_jobs[0], next_href="/jobs?start=10"),
+        "https://example.com/jobs?start=10": _indeed_page(page_jobs[1], next_href="/jobs?start=20"),
+        "https://example.com/jobs?start=20": _indeed_page(page_jobs[2], next_href="/jobs?start=30"),
+        "https://example.com/jobs?start=30": _indeed_page(page_jobs[3], next_href=None),
     }
     known_jobs = {}
     for page in page_jobs[:3]:
@@ -86,7 +87,10 @@ def test_fetcher_paginates_and_stops_after_mostly_known_pages() -> None:
         return FakeResponse(responses[url], headers={"etag": "etag-1"})
 
     fetcher._request_text = fake_request_text  # type: ignore[method-assign]
-    fetcher._fetch_dynamic_html = lambda url: None  # type: ignore[assignment]
+    async def fake_dynamic_html(scan_source, url, *, progress_callback=None):  # noqa: ANN001
+        return None
+
+    fetcher._fetch_dynamic_html = fake_dynamic_html  # type: ignore[method-assign]
 
     jobs, _, _, _ = asyncio.run(
         fetcher._fetch_search_page(
@@ -102,8 +106,8 @@ def test_fetcher_paginates_and_stops_after_mostly_known_pages() -> None:
 
     assert requested_urls == [
         "https://example.com/jobs",
-        "https://example.com/jobs?page=2",
-        "https://example.com/jobs?page=3",
+        "https://example.com/jobs?start=10",
+        "https://example.com/jobs?start=20",
     ]
     assert len(jobs) == 18
 
@@ -141,7 +145,10 @@ def test_fetcher_only_enriches_new_or_changed_jobs() -> None:
 
     fetcher._request_text = fake_request_text  # type: ignore[method-assign]
     fetcher._enrich_detail_pages = fake_enrich  # type: ignore[method-assign]
-    fetcher._fetch_dynamic_html = lambda url: None  # type: ignore[assignment]
+    async def fake_dynamic_html(scan_source, url, *, progress_callback=None):  # noqa: ANN001
+        return None
+
+    fetcher._fetch_dynamic_html = fake_dynamic_html  # type: ignore[method-assign]
 
     jobs, _, _, _ = asyncio.run(
         fetcher._fetch_search_page(
@@ -184,7 +191,10 @@ def test_scan_source_emits_progress_and_records_metrics() -> None:
 
     fetcher._request_text = fake_request_text  # type: ignore[method-assign]
     fetcher._enrich_detail_pages = fake_enrich  # type: ignore[method-assign]
-    fetcher._fetch_dynamic_html = lambda url: None  # type: ignore[assignment]
+    async def fake_dynamic_html(scan_source, url, *, progress_callback=None):  # noqa: ANN001
+        return None
+
+    fetcher._fetch_dynamic_html = fake_dynamic_html  # type: ignore[method-assign]
 
     result = asyncio.run(
         fetcher.scan_source(
@@ -219,7 +229,7 @@ def test_scan_source_falls_back_to_playwright_after_403() -> None:
         response = httpx.Response(403, request=request)
         raise httpx.HTTPStatusError("Forbidden", request=request, response=response)
 
-    async def fake_dynamic_html(url: str) -> str | None:
+    async def fake_dynamic_html(scan_source, url: str, *, progress_callback=None) -> str | None:  # noqa: ANN001
         return _indeed_page(_job_payloads("dynamic", 2))
 
     async def fake_enrich(jobs, scan_source, *, throttle):  # noqa: ANN001
@@ -244,6 +254,54 @@ def test_scan_source_falls_back_to_playwright_after_403() -> None:
 
     assert len(jobs) == 2
     assert any(event["event"] == "source_fallback" for event in progress_events)
+
+
+def test_scan_source_marks_security_check_as_blocked() -> None:
+    source = JobSourceConfig(
+        id=5,
+        name="Indeed Search",
+        source_type="indeed",
+        url="https://www.indeed.com/jobs?q=system+administrator&l=Remote&cf-turnstile-response=token&vjk=abc123",
+        max_pages=1,
+        request_delay_ms=0,
+    )
+    fetcher = JobFetcher(JobNormalizer())
+
+    async def fake_request_text(scan_source, url, *, throttle, conditional=True):  # noqa: ANN001
+        request = httpx.Request("GET", url)
+        response = httpx.Response(403, request=request)
+        raise httpx.HTTPStatusError("Forbidden", request=request, response=response)
+
+    async def fake_dynamic_html(scan_source, url: str, *, progress_callback=None) -> str | None:  # noqa: ANN001
+        return """
+        <html>
+          <head><title>Just a moment...</title></head>
+          <body>
+            Additional Verification Required
+            Your Ray ID for this request is 9f4082767d29f2e9
+            Troubleshooting Cloudflare Errors
+          </body>
+        </html>
+        """
+
+    fetcher._request_text = fake_request_text  # type: ignore[method-assign]
+    fetcher._fetch_dynamic_html = fake_dynamic_html  # type: ignore[method-assign]
+
+    result = asyncio.run(fetcher.scan_source(source, max_jobs=20, known_jobs={}))
+
+    assert result.status == "blocked"
+    assert result.block_reason == "security_check"
+    assert "persistent browser profile" in (result.error or "")
+    assert source.url == "https://www.indeed.com/jobs?l=Remote&q=system+administrator"
+
+
+def test_sanitize_source_url_strips_indeed_challenge_parameters() -> None:
+    url = (
+        "https://www.indeed.com/jobs?q=system+administrator&l=Remote"
+        "&from=searchOnDesktopSerp&cf-turnstile-response=token&vjk=2247cc8ae78b6846"
+    )
+
+    assert sanitize_source_url(url, "indeed") == "https://www.indeed.com/jobs?l=Remote&q=system+administrator"
 
 
 def test_engine_deduplicates_cross_source_jobs_by_canonical_url() -> None:

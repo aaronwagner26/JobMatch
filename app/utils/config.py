@@ -8,6 +8,7 @@ DATA_DIR = PROJECT_ROOT / "data"
 UPLOADS_DIR = DATA_DIR / "uploads"
 EXPORTS_DIR = DATA_DIR / "exports"
 LOGS_DIR = DATA_DIR / "logs"
+BROWSER_PROFILES_DIR = DATA_DIR / "browser_profiles"
 DB_PATH = DATA_DIR / "jobmatch.sqlite3"
 
 APP_NAME = "JobMatch"
@@ -23,6 +24,7 @@ DEFAULT_REQUEST_BACKOFF_MULTIPLIER = 2.0
 DEFAULT_EARLY_STOP_MIN_PAGES = 3
 DEFAULT_EARLY_STOP_CONSECUTIVE_PAGES = 2
 DEFAULT_EARLY_STOP_KNOWN_RATIO = 0.85
+DEFAULT_BROWSER_CHALLENGE_WAIT_SECONDS = 75
 
 SOURCE_TYPES = [
     "auto",
@@ -66,5 +68,5 @@ DEFAULT_HEADERS = {
 
 
 def ensure_directories() -> None:
-    for directory in (DATA_DIR, UPLOADS_DIR, EXPORTS_DIR, LOGS_DIR):
+    for directory in (DATA_DIR, UPLOADS_DIR, EXPORTS_DIR, LOGS_DIR, BROWSER_PROFILES_DIR):
         directory.mkdir(parents=True, exist_ok=True)

@@ -15,6 +15,7 @@ from dateutil import parser as date_parser
 WHITESPACE_RE = re.compile(r"\s+")
 NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
 TRACKING_QUERY_KEYS = {
+    "cf-turnstile-response",
     "fbclid",
     "gclid",
     "gh_src",
@@ -25,7 +26,23 @@ TRACKING_QUERY_KEYS = {
     "src",
     "tracking",
     "trk",
+    "vjk",
 }
+INDEED_ALLOWED_QUERY_KEYS = {
+    "explvl",
+    "filter",
+    "fromage",
+    "jt",
+    "l",
+    "q",
+    "radius",
+    "remotejob",
+    "salaryType",
+    "sc",
+    "sort",
+    "start",
+}
+INDEED_ALLOWED_QUERY_KEYS_FOLDED = {key.casefold() for key in INDEED_ALLOWED_QUERY_KEYS}
 
 
 def normalize_whitespace(text: str | None) -> str:
@@ -93,6 +110,38 @@ def canonical_job_key(title: str, company: str, location: str, url: str | None, 
         normalize_whitespace(job_type).casefold(),
     ]
     return "title:" + "|".join(pieces)
+
+
+def sanitize_source_url(url: str | None, source_type: str = "auto") -> str:
+    if not url:
+        return ""
+    normalized = normalize_whitespace(url)
+    split = urlsplit(normalized)
+    if not split.scheme or not split.netloc:
+        return normalized
+
+    host = split.netloc.casefold()
+    params = parse_qsl(split.query, keep_blank_values=False)
+    filtered: list[tuple[str, str]] = []
+    effective_source = source_type.casefold()
+    is_indeed = effective_source == "indeed" or "indeed." in host
+
+    for key, value in params:
+        folded = key.casefold()
+        if folded.startswith("utm_") or folded.startswith("__cf_"):
+            continue
+        if folded in TRACKING_QUERY_KEYS:
+            continue
+        if is_indeed:
+            if folded == "from":
+                continue
+            if folded not in INDEED_ALLOWED_QUERY_KEYS_FOLDED:
+                continue
+        filtered.append((key, value))
+
+    normalized_path = re.sub(r"/{2,}", "/", split.path or "/").rstrip("/") or "/"
+    query = urlencode(sorted(filtered))
+    return urlunsplit((split.scheme.casefold(), split.netloc.casefold(), normalized_path, query, ""))
 
 
 def parse_datetime(value: Any) -> datetime | None:

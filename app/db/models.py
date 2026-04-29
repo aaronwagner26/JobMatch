@@ -44,6 +44,7 @@ class SourceRecord(Base):
     identifier: Mapped[str | None] = mapped_column(String(255), nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     use_playwright: Mapped[bool] = mapped_column(Boolean, default=False)
+    use_browser_profile: Mapped[bool] = mapped_column(Boolean, default=False)
     refresh_minutes: Mapped[int] = mapped_column(Integer, default=180)
     max_pages: Mapped[int] = mapped_column(Integer, default=3)
     request_delay_ms: Mapped[int] = mapped_column(Integer, default=750)

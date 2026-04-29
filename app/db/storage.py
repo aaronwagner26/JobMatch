@@ -129,6 +129,7 @@ class Storage:
                     identifier=payload.identifier,
                     enabled=payload.enabled,
                     use_playwright=payload.use_playwright,
+                    use_browser_profile=payload.use_browser_profile,
                     refresh_minutes=payload.refresh_minutes,
                     max_pages=payload.max_pages,
                     request_delay_ms=payload.request_delay_ms,
@@ -143,6 +144,7 @@ class Storage:
                 record.identifier = payload.identifier
                 record.enabled = payload.enabled
                 record.use_playwright = payload.use_playwright
+                record.use_browser_profile = payload.use_browser_profile
                 record.refresh_minutes = payload.refresh_minutes
                 record.max_pages = payload.max_pages
                 record.request_delay_ms = payload.request_delay_ms
@@ -362,6 +364,8 @@ class Storage:
             statements.append(
                 f"ALTER TABLE sources ADD COLUMN request_delay_ms INTEGER DEFAULT {DEFAULT_SOURCE_REQUEST_DELAY_MS}"
             )
+        if "use_browser_profile" not in source_columns:
+            statements.append("ALTER TABLE sources ADD COLUMN use_browser_profile BOOLEAN DEFAULT 0")
         if not statements:
             return
         with self.engine.begin() as connection:
@@ -397,6 +401,7 @@ class Storage:
             identifier=record.identifier,
             enabled=record.enabled,
             use_playwright=record.use_playwright,
+            use_browser_profile=getattr(record, "use_browser_profile", False),
             refresh_minutes=record.refresh_minutes,
             max_pages=record.max_pages or DEFAULT_SOURCE_MAX_PAGES,
             request_delay_ms=record.request_delay_ms or DEFAULT_SOURCE_REQUEST_DELAY_MS,
