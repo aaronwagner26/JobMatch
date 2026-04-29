@@ -87,6 +87,18 @@ class FilterCriteria:
 
 
 @dataclass(slots=True)
+class DiscoveredSourceCandidate:
+    name: str
+    source_type: str
+    url: str
+    platform: str
+    reason: str
+    identifier: str | None = None
+    use_playwright: bool = False
+    use_browser_profile: bool = False
+
+
+@dataclass(slots=True)
 class MatchWeights:
     embedding: float = 0.68
     skill: float = 0.22

@@ -11,7 +11,7 @@ from typing import Any
 from nicegui import app, events, ui
 
 from app.core.engine import JobMatchEngine
-from app.core.types import FilterCriteria, JobSourceConfig, MatchResult, ScanSummary
+from app.core.types import DiscoveredSourceCandidate, FilterCriteria, JobSourceConfig, MatchResult, ScanSummary
 from app.utils.config import (
     APP_NAME,
     DEFAULT_SOURCE_MAX_PAGES,
@@ -162,6 +162,8 @@ class UIState:
     recent_scans: list[dict[str, Any]] = field(default_factory=list)
     selected_source_id: int | None = None
     manual_job_urls: str = ""
+    discovery_query: str = ""
+    discovery_results: list[dict[str, Any]] = field(default_factory=list)
     source_form: dict[str, Any] = field(
         default_factory=lambda: {
             "id": None,
@@ -399,6 +401,43 @@ class JobMatchUI:
                     ui.button("New source", icon="add", on_click=self.reset_source_form).props("unelevated")
                     ui.button("Save source", icon="save", on_click=self.save_source_form).props("unelevated")
                     ui.button("Delete source", icon="delete", on_click=self.delete_selected_source).props("flat")
+
+            with ui.element("section").classes("panel"):
+                with ui.row().classes("w-full items-end gap-3"):
+                    ui.input(
+                        "Discover from company name, homepage, or careers URL",
+                        value=self.state.discovery_query,
+                        on_change=lambda e: setattr(self.state, "discovery_query", e.value or ""),
+                    ).props("outlined").classes("w-full")
+                    ui.button(
+                        "Discover Source",
+                        icon="travel_explore",
+                        on_click=lambda: asyncio.create_task(self.handle_source_discovery()),
+                    ).props("unelevated")
+                ui.label(
+                    "Discovery looks for ATS boards like Greenhouse, Lever, Ashby, Workday, and company careers pages so you do not need to know those URLs ahead of time."
+                ).classes("mt-3 muted-copy text-sm")
+                if self.state.discovery_results:
+                    with ui.column().classes("w-full gap-2 mt-4"):
+                        for index, candidate in enumerate(self.state.discovery_results):
+                            with ui.row().classes("w-full items-start justify-between gap-3 panel panel-tight"):
+                                with ui.column().classes("gap-1"):
+                                    ui.label(candidate["name"]).classes("font-semibold")
+                                    ui.label(
+                                        f"{candidate['platform']} -> {candidate['source_type']} | {candidate['reason']}"
+                                    ).classes("muted-copy text-sm")
+                                    ui.label(candidate["url"]).classes("mono text-xs")
+                                with ui.row().classes("gap-2"):
+                                    ui.button(
+                                        "Load",
+                                        icon="arrow_downward",
+                                        on_click=lambda _, idx=index: self.load_discovered_candidate(idx),
+                                    ).props("flat")
+                                    ui.button(
+                                        "Save",
+                                        icon="save",
+                                        on_click=lambda _, idx=index: self.save_discovered_candidate(idx),
+                                    ).props("unelevated")
 
             with ui.element("div").classes("sources-grid"):
                 with ui.element("section").classes("panel"):
@@ -851,6 +890,78 @@ class JobMatchUI:
         self.engine.update_settings(values)
         ui.notify("Settings saved.", type="positive")
 
+    async def handle_source_discovery(self) -> None:
+        query = self.state.discovery_query.strip()
+        if not query:
+            ui.notify("Enter a company name, homepage, or careers URL first.", type="warning")
+            return
+        self.status_label.set_text("Discovering sources...")
+        self._append_activity(f"Discovering source candidates for {query}.")
+        try:
+            candidates = await asyncio.to_thread(self.engine.discover_sources, query)
+            self.state.discovery_results = [self._candidate_to_dict(candidate) for candidate in candidates]
+            if candidates:
+                self._append_activity(f"Discovery found {len(candidates)} candidate source(s) for {query}.")
+                ui.notify(f"Found {len(candidates)} candidate source(s).", type="positive")
+            else:
+                self._append_activity(f"Discovery found no candidates for {query}.")
+                ui.notify("No candidates found from that query.", type="warning")
+            self.render_current_view()
+        except Exception as exc:
+            self._append_activity(f"Source discovery failed for {query}: {exc}")
+            ui.notify(f"Source discovery failed: {exc}", type="negative")
+        finally:
+            self.status_label.set_text(self.state.scan_status if self.state.scan_running else "Ready")
+            self.render_scan_log_panel()
+
+    def load_discovered_candidate(self, index: int) -> None:
+        if index < 0 or index >= len(self.state.discovery_results):
+            return
+        candidate = self.state.discovery_results[index]
+        payload = self.engine.source_from_candidate(self._dict_to_candidate(candidate))
+        self.state.selected_source_id = None
+        self.state.source_form = {
+            "id": None,
+            "name": payload.name,
+            "source_type": payload.source_type,
+            "url": payload.url,
+            "identifier": payload.identifier or "",
+            "enabled": payload.enabled,
+            "use_playwright": payload.use_playwright,
+            "use_browser_profile": payload.use_browser_profile,
+            "refresh_minutes": payload.refresh_minutes,
+            "max_pages": payload.max_pages,
+            "request_delay_ms": payload.request_delay_ms,
+            "notes": payload.notes,
+        }
+        self.render_current_view()
+
+    def save_discovered_candidate(self, index: int) -> None:
+        if index < 0 or index >= len(self.state.discovery_results):
+            return
+        candidate = self.state.discovery_results[index]
+        payload = self.engine.source_from_candidate(self._dict_to_candidate(candidate))
+        saved = self.engine.save_source(payload)
+        self.state.selected_source_id = saved.id
+        self.state.source_form = {
+            "id": saved.id,
+            "name": saved.name,
+            "source_type": saved.source_type,
+            "url": saved.url,
+            "identifier": saved.identifier or "",
+            "enabled": saved.enabled,
+            "use_playwright": saved.use_playwright,
+            "use_browser_profile": saved.use_browser_profile,
+            "refresh_minutes": saved.refresh_minutes,
+            "max_pages": saved.max_pages,
+            "request_delay_ms": saved.request_delay_ms,
+            "notes": saved.notes,
+        }
+        self._append_activity(f"Saved discovered source {saved.name} ({saved.url}).")
+        self.render_sidebar()
+        self.render_current_view()
+        ui.notify(f"Saved source: {saved.name}", type="positive")
+
     def open_selected_source_browser(self) -> None:
         source = self._selected_source()
         if source is None:
@@ -967,6 +1078,32 @@ class JobMatchUI:
         if not self.state.selected_source_id:
             return None
         return self.engine.get_source(self.state.selected_source_id)
+
+    @staticmethod
+    def _candidate_to_dict(candidate: DiscoveredSourceCandidate) -> dict[str, Any]:
+        return {
+            "name": candidate.name,
+            "source_type": candidate.source_type,
+            "url": candidate.url,
+            "platform": candidate.platform,
+            "reason": candidate.reason,
+            "identifier": candidate.identifier,
+            "use_playwright": candidate.use_playwright,
+            "use_browser_profile": candidate.use_browser_profile,
+        }
+
+    @staticmethod
+    def _dict_to_candidate(payload: dict[str, Any]) -> DiscoveredSourceCandidate:
+        return DiscoveredSourceCandidate(
+            name=str(payload.get("name") or ""),
+            source_type=str(payload.get("source_type") or "custom_url"),
+            url=str(payload.get("url") or ""),
+            platform=str(payload.get("platform") or "careers page"),
+            reason=str(payload.get("reason") or ""),
+            identifier=payload.get("identifier") or None,
+            use_playwright=bool(payload.get("use_playwright")),
+            use_browser_profile=bool(payload.get("use_browser_profile")),
+        )
 
     def _append_activity(self, message: str) -> None:
         timestamp = datetime.now().strftime("%H:%M:%S")

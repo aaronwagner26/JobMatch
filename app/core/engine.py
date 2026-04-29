@@ -12,7 +12,17 @@ from app.core.job_fetcher import JobFetcher
 from app.core.matcher import JobMatcher
 from app.core.normalizer import JobNormalizer
 from app.core.resume_parser import ResumeParser
-from app.core.types import FilterCriteria, JobSourceConfig, MatchResult, MatchWeights, ResumeProfile, ScanResult, ScanSummary
+from app.core.source_discovery import SourceDiscovery
+from app.core.types import (
+    DiscoveredSourceCandidate,
+    FilterCriteria,
+    JobSourceConfig,
+    MatchResult,
+    MatchWeights,
+    ResumeProfile,
+    ScanResult,
+    ScanSummary,
+)
 from app.db.storage import Storage
 from app.utils.config import DEFAULT_SCAN_CONCURRENCY, DEFAULT_SETTINGS, EXPORTS_DIR, UPLOADS_DIR, ensure_directories
 from app.utils.text import canonical_job_key, safe_filename, sanitize_source_url
@@ -25,6 +35,7 @@ class JobMatchEngine:
         self.storage.init_db()
         self.resume_parser = ResumeParser()
         self.job_fetcher = JobFetcher(JobNormalizer())
+        self.source_discovery = SourceDiscovery()
         self._scan_lock = asyncio.Lock()
         self._scan_cancel_requested = asyncio.Event()
         self._matcher_cache: dict[tuple[str, float, float, float], JobMatcher] = {}
@@ -50,6 +61,25 @@ class JobMatchEngine:
     def save_source(self, payload: JobSourceConfig) -> JobSourceConfig:
         payload.url = sanitize_source_url(payload.url, payload.source_type)
         return self.storage.upsert_source(payload)
+
+    def discover_sources(self, query: str) -> list[DiscoveredSourceCandidate]:
+        return self.source_discovery.discover(query)
+
+    def source_from_candidate(self, candidate: DiscoveredSourceCandidate) -> JobSourceConfig:
+        return JobSourceConfig(
+            id=None,
+            name=candidate.name,
+            source_type=candidate.source_type,
+            url=candidate.url,
+            identifier=candidate.identifier,
+            enabled=True,
+            use_playwright=candidate.use_playwright,
+            use_browser_profile=candidate.use_browser_profile,
+            refresh_minutes=180,
+            max_pages=3,
+            request_delay_ms=750,
+            notes=f"Discovered via {candidate.platform}: {candidate.reason}",
+        )
 
     def delete_source(self, source_id: int) -> None:
         self.storage.delete_source(source_id)
