@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import re
@@ -690,6 +691,7 @@ class JobFetcher:
 
     async def _fetch_dynamic_html(self, url: str) -> str | None:
         try:
+            from playwright.async_api import TimeoutError as PlaywrightTimeoutError
             from playwright.async_api import async_playwright
         except Exception:
             logger.warning("Playwright is unavailable; falling back to static scraping for %s", url)
@@ -697,15 +699,44 @@ class JobFetcher:
 
         try:
             async with async_playwright() as playwright:
-                browser = await playwright.chromium.launch(headless=True)
-                page = await browser.new_page(
+                browser = await playwright.chromium.launch(
+                    headless=True,
+                    args=[
+                        "--disable-blink-features=AutomationControlled",
+                        "--disable-dev-shm-usage",
+                    ],
+                )
+                context = await browser.new_context(
                     user_agent=DEFAULT_HEADERS["User-Agent"],
                     locale="en-US",
                     extra_http_headers={"Accept-Language": DEFAULT_HEADERS["Accept-Language"]},
                     viewport={"width": 1440, "height": 1024},
                 )
-                await page.goto(url, wait_until="networkidle", timeout=int(DEFAULT_HTTP_TIMEOUT * 1000))
+                page = await context.new_page()
+                await page.add_init_script(
+                    """
+                    Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                    window.chrome = window.chrome || { runtime: {} };
+                    """
+                )
+                try:
+                    await page.goto(url, wait_until="domcontentloaded", timeout=int(DEFAULT_HTTP_TIMEOUT * 1000))
+                except PlaywrightTimeoutError:
+                    logger.warning("Playwright goto timed out for %s; capturing whatever loaded.", url)
+                selectors = [
+                    "[data-jk]",
+                    "[data-testid='slider_item']",
+                    ".jobsearch-ResultsList",
+                    "main",
+                    "article",
+                ]
+                for selector in selectors:
+                    with contextlib.suppress(Exception):
+                        await page.wait_for_selector(selector, timeout=2500)
+                        break
+                await page.wait_for_timeout(1200)
                 html = await page.content()
+                await context.close()
                 await browser.close()
                 return html
         except Exception as exc:

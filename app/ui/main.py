@@ -182,6 +182,7 @@ class JobMatchUI:
         self.engine = engine
         self.state = UIState()
         self.dark_mode = ui.dark_mode(False)
+        self.client = None
         self.content = None
         self.nav_shell = None
         self.status_label = None
@@ -190,10 +191,14 @@ class JobMatchUI:
         self.scan_summary_panel = None
         self.scan_log_panel = None
         self.scan_log_widget = None
+        self._client_deleted = False
+        self._background_tasks: list[asyncio.Task] = []
         self.source_inputs: dict[str, Any] = {}
         self.settings_inputs: dict[str, Any] = {}
 
     def mount(self) -> None:
+        self.client = ui.context.client
+        self.client.on_delete(self._handle_client_delete)
         with ui.header(elevated=False, bordered=False).classes("app-header px-4 py-2 items-center"):
             with ui.row().classes("w-full items-center justify-between"):
                 with ui.row().classes("items-center gap-4"):
@@ -213,10 +218,47 @@ class JobMatchUI:
         with ui.column().classes("app-shell w-full"):
             self.content = ui.column().classes("content-shell")
             self.render_current_view()
-            ui.timer(0.2, lambda: asyncio.create_task(self.bootstrap()), once=True, immediate=False)
-            ui.timer(60.0, lambda: asyncio.create_task(self.schedule_tick()), immediate=False)
+            self._start_background_task(self._bootstrap_after_mount())
+            self._start_background_task(self._schedule_loop())
+
+    async def _bootstrap_after_mount(self) -> None:
+        await asyncio.sleep(0.2)
+        if self._client_deleted:
+            return
+        await self.bootstrap()
+
+    async def _schedule_loop(self) -> None:
+        while not self._client_deleted:
+            await asyncio.sleep(60.0)
+            if self._client_deleted:
+                break
+            await self.schedule_tick()
+
+    def _start_background_task(self, coroutine) -> None:
+        task = asyncio.create_task(coroutine)
+        self._background_tasks.append(task)
+
+        def cleanup(done_task: asyncio.Task) -> None:
+            if done_task in self._background_tasks:
+                self._background_tasks.remove(done_task)
+            if done_task.cancelled():
+                return
+            try:
+                done_task.result()
+            except Exception:
+                return
+
+        task.add_done_callback(cleanup)
+
+    def _handle_client_delete(self) -> None:
+        self._client_deleted = True
+        for task in list(self._background_tasks):
+            task.cancel()
+        self._background_tasks.clear()
 
     async def bootstrap(self) -> None:
+        if self._client_deleted:
+            return
         scans = self.engine.list_recent_scans(limit=1)
         self.state.recent_scans = self.engine.list_recent_scans(limit=8)
         if scans and scans[0].get("finished_at"):
@@ -236,6 +278,8 @@ class JobMatchUI:
         self.render_current_view()
 
     def render_sidebar(self) -> None:
+        if self._client_deleted or self.nav_shell is None:
+            return
         self.nav_shell.clear()
         with self.nav_shell:
             ui.label("Workspace").classes("drawer-brand")
@@ -261,6 +305,8 @@ class JobMatchUI:
         self.render_current_view()
 
     def render_current_view(self) -> None:
+        if self._client_deleted or self.content is None:
+            return
         self.scan_summary_panel = None
         self.scan_log_panel = None
         self.scan_log_widget = None
@@ -481,7 +527,7 @@ class JobMatchUI:
                     ui.label("Weights are normalized automatically, so they do not need to sum to 1.0.").classes("mt-3 muted-copy")
 
     def render_scan_summary_panel(self) -> None:
-        if self.scan_summary_panel is None:
+        if self._client_deleted or self.scan_summary_panel is None:
             return
         self.scan_summary_panel.clear()
         totals = self._scan_totals()
@@ -543,7 +589,7 @@ class JobMatchUI:
                 self._empty_state("No scan activity yet. Add sources, then run a scan.")
 
     def render_scan_log_panel(self) -> None:
-        if self.scan_log_panel is None:
+        if self._client_deleted or self.scan_log_panel is None:
             return
         self.scan_log_panel.clear()
         with self.scan_log_panel:
@@ -563,6 +609,8 @@ class JobMatchUI:
                 self.scan_log_widget.push(line, classes="mono text-xs")
 
     async def refresh_matches(self, *, record_activity: bool = True) -> None:
+        if self._client_deleted:
+            return
         self.status_label.set_text("Ranking jobs...")
         if record_activity:
             self._append_activity("Ranking cached jobs against the active resume.")
@@ -583,6 +631,8 @@ class JobMatchUI:
             self.render_current_view()
 
     async def handle_scan(self, *, background: bool = False) -> None:
+        if self._client_deleted:
+            return
         if self.state.scan_running:
             self._append_activity("Scan request ignored because a scan is already running.")
             self.render_scan_log_panel()
@@ -623,10 +673,14 @@ class JobMatchUI:
             self.render_scan_log_panel()
 
     async def schedule_tick(self) -> None:
+        if self._client_deleted:
+            return
         if self.engine.should_run_scheduled_scan():
             await self.handle_scan(background=True)
 
     async def handle_resume_upload(self, event: events.UploadEventArguments) -> None:
+        if self._client_deleted:
+            return
         suffix = Path(event.file.name).suffix or ".pdf"
         incoming_path = UPLOADS_DIR / f"incoming-{safe_filename(Path(event.file.name).stem, suffix)}"
         await event.file.save(incoming_path)
@@ -739,7 +793,7 @@ class JobMatchUI:
         line = f"[{timestamp}] {message}"
         self.state.scan_log_lines.append(line)
         self.state.scan_log_lines = self.state.scan_log_lines[-160:]
-        if self.scan_log_widget is not None:
+        if not self._client_deleted and self.scan_log_widget is not None:
             self.scan_log_widget.push(line, classes="mono text-xs")
 
     def _handle_scan_progress(self, event: dict[str, Any]) -> None:
