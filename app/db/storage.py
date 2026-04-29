@@ -191,11 +191,17 @@ class Storage:
 
     def list_scans(self, limit: int = 25) -> list[dict]:
         with self.session() as session:
-            records = session.scalars(select(ScanRecord).order_by(ScanRecord.started_at.desc()).limit(limit)).all()
+            rows = session.execute(
+                select(ScanRecord, SourceRecord.name)
+                .outerjoin(SourceRecord, ScanRecord.source_id == SourceRecord.id)
+                .order_by(ScanRecord.started_at.desc())
+                .limit(limit)
+            ).all()
             return [
                 {
                     "id": record.id,
                     "source_id": record.source_id,
+                    "source_name": source_name or (f"Source #{record.source_id}" if record.source_id else "Unknown source"),
                     "started_at": record.started_at,
                     "finished_at": record.finished_at,
                     "status": record.status,
@@ -206,7 +212,7 @@ class Storage:
                     "jobs_deactivated": record.jobs_deactivated,
                     "error_text": record.error_text,
                 }
-                for record in records
+                for record, source_name in rows
             ]
 
     def update_source_scan_state(

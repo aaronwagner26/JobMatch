@@ -93,6 +93,8 @@ def test_fetcher_paginates_and_stops_after_mostly_known_pages() -> None:
             max_jobs=120,
             known_jobs=known_jobs,
             throttle=SourceThrottle(0),
+            progress_callback=None,
+            diagnostics={"pages_scanned": 0, "detail_pages_fetched": 0, "stopped_early": False},
         )
     )
 
@@ -146,6 +148,8 @@ def test_fetcher_only_enriches_new_or_changed_jobs() -> None:
             max_jobs=20,
             known_jobs=known_jobs,
             throttle=SourceThrottle(0),
+            progress_callback=None,
+            diagnostics={"pages_scanned": 0, "detail_pages_fetched": 0, "stopped_early": False},
         )
     )
 
@@ -154,6 +158,46 @@ def test_fetcher_only_enriches_new_or_changed_jobs() -> None:
     assert captured_batches[0][0].startswith("new-")
     known_job = next(job for job in jobs if job["external_id"] == external_id)
     assert known_job["description"] == "Stored job description"
+
+
+def test_scan_source_emits_progress_and_records_metrics() -> None:
+    source = JobSourceConfig(
+        id=3,
+        name="Indeed Search",
+        source_type="indeed",
+        url="https://example.com/jobs",
+        max_pages=2,
+        request_delay_ms=0,
+    )
+    fetcher = JobFetcher(JobNormalizer())
+    page = _job_payloads("first", 2)
+    progress_events: list[dict] = []
+
+    async def fake_request_text(scan_source, url, *, throttle, conditional=True):  # noqa: ANN001
+        return FakeResponse(_indeed_page(page))
+
+    async def fake_enrich(jobs, scan_source, *, throttle):  # noqa: ANN001
+        for job in jobs:
+            job["description"] = f"Detailed {job['title']}"
+
+    fetcher._request_text = fake_request_text  # type: ignore[method-assign]
+    fetcher._enrich_detail_pages = fake_enrich  # type: ignore[method-assign]
+    fetcher._fetch_dynamic_html = lambda url: None  # type: ignore[assignment]
+
+    result = asyncio.run(
+        fetcher.scan_source(
+            source,
+            max_jobs=20,
+            known_jobs={},
+            progress_callback=lambda event: progress_events.append(event),
+        )
+    )
+
+    assert result.status == "ok"
+    assert result.pages_scanned == 1
+    assert result.detail_pages_fetched == 2
+    assert any(event["event"] == "source_page" for event in progress_events)
+    assert any(event["event"] == "source_detail" for event in progress_events)
 
 
 def test_engine_deduplicates_cross_source_jobs_by_canonical_url() -> None:

@@ -127,6 +127,9 @@ class ScanResult:
     jobs_updated: int = 0
     jobs_unchanged: int = 0
     jobs_deactivated: int = 0
+    pages_scanned: int = 0
+    detail_pages_fetched: int = 0
+    stopped_early: bool = False
 
 
 @dataclass(slots=True)
@@ -138,3 +141,23 @@ class ScanSummary:
     @property
     def total_jobs(self) -> int:
         return sum(len(result.jobs) for result in self.results)
+
+    @property
+    def total_created(self) -> int:
+        return sum(result.jobs_created for result in self.results)
+
+    @property
+    def total_updated(self) -> int:
+        return sum(result.jobs_updated for result in self.results)
+
+    @property
+    def total_unchanged(self) -> int:
+        return sum(result.jobs_unchanged for result in self.results)
+
+    @property
+    def total_deactivated(self) -> int:
+        return sum(result.jobs_deactivated for result in self.results)
+
+    @property
+    def error_count(self) -> int:
+        return sum(1 for result in self.results if result.status == "error")

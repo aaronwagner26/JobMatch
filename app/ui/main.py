@@ -4,13 +4,14 @@ import argparse
 import asyncio
 import os
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from nicegui import app, events, ui
 
 from app.core.engine import JobMatchEngine
-from app.core.types import FilterCriteria, JobSourceConfig, MatchResult
+from app.core.types import FilterCriteria, JobSourceConfig, MatchResult, ScanSummary
 from app.utils.config import (
     APP_NAME,
     DEFAULT_SOURCE_MAX_PAGES,
@@ -99,6 +100,15 @@ ui.add_css(
     .toolbar-grid { display: grid; grid-template-columns: 1.3fr 0.9fr 0.9fr 1.1fr auto auto auto; gap: 0.75rem; width: 100%; align-items: end; }
     .toolbar-grid .q-field, .toolbar-grid .q-select, .toolbar-grid .q-input { width: 100%; }
     .results-shell .q-table__middle { max-height: calc(100vh - 300px); }
+    .scan-grid { display: grid; grid-template-columns: minmax(460px, 1.15fr) minmax(320px, 0.85fr); gap: 1rem; width: 100%; }
+    .scan-metrics { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 0.75rem; width: 100%; }
+    .scan-status-row { display: flex; align-items: center; gap: 0.75rem; }
+    .scan-log { height: 320px; overflow-y: auto; background: var(--app-surface-2); border: 1px solid var(--app-border); border-radius: 14px; padding: 0.6rem; }
+    .scan-log .q-item__label, .scan-log .text-sm, .scan-log .text-xs { color: var(--app-text); }
+    .error-banner { border-radius: 14px; padding: 0.75rem 0.9rem; border: 1px solid rgba(220, 38, 38, 0.25); background: rgba(220, 38, 38, 0.08); color: #b91c1c; }
+    body.body--dark .error-banner { color: #fecaca; }
+    .info-banner { border-radius: 14px; padding: 0.75rem 0.9rem; border: 1px solid var(--app-border); background: var(--app-surface-2); color: var(--app-text); }
+    .recent-scan-table .q-table__middle { max-height: 260px; }
     .results-shell thead tr th { position: sticky; top: 0; z-index: 1; background: var(--app-surface); }
     .score-pill { display: inline-flex; min-width: 3.7rem; justify-content: center; padding: 0.2rem 0.45rem; border-radius: 999px; background: rgba(15, 118, 110, 0.12); color: var(--app-accent); font-size: 0.78rem; }
     .job-primary { font-weight: 600; color: var(--app-text); }
@@ -118,6 +128,7 @@ ui.add_css(
       .toolbar-grid { grid-template-columns: 1fr 1fr; }
       .detail-grid { grid-template-columns: 1fr; }
       .stat-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .scan-grid, .scan-metrics { grid-template-columns: 1fr; }
       .sources-grid, .settings-grid { grid-template-columns: 1fr; }
     }
     @media (max-width: 768px) {
@@ -140,6 +151,14 @@ class UIState:
     clearance_terms: list[str] = field(default_factory=list)
     matches: list[MatchResult] = field(default_factory=list)
     match_error: str = ""
+    scan_running: bool = False
+    scan_status: str = "Ready"
+    scan_error: str = ""
+    scan_source_total: int = 0
+    scan_sources_finished: int = 0
+    scan_rows: list[dict[str, Any]] = field(default_factory=list)
+    scan_log_lines: list[str] = field(default_factory=list)
+    recent_scans: list[dict[str, Any]] = field(default_factory=list)
     selected_source_id: int | None = None
     source_form: dict[str, Any] = field(
         default_factory=lambda: {
@@ -168,6 +187,9 @@ class JobMatchUI:
         self.status_label = None
         self.last_scan_label = None
         self.scan_button = None
+        self.scan_summary_panel = None
+        self.scan_log_panel = None
+        self.scan_log_widget = None
         self.source_inputs: dict[str, Any] = {}
         self.settings_inputs: dict[str, Any] = {}
 
@@ -196,14 +218,21 @@ class JobMatchUI:
 
     async def bootstrap(self) -> None:
         scans = self.engine.list_recent_scans(limit=1)
+        self.state.recent_scans = self.engine.list_recent_scans(limit=8)
         if scans and scans[0].get("finished_at"):
             finished_at = scans[0]["finished_at"]
             self.last_scan_label.set_text(f"Last scan: {finished_at:%Y-%m-%d %H:%M}")
-        try:
-            self.state.matches = await asyncio.to_thread(self.engine.get_ranked_matches, self.current_filters())
-        except Exception as exc:
-            self.state.match_error = str(exc)
+        if self.engine.get_active_resume():
+            try:
+                self.state.matches = await asyncio.to_thread(self.engine.get_ranked_matches, self.current_filters())
+                self.state.match_error = ""
+            except Exception as exc:
+                self.state.match_error = str(exc)
+                self.state.matches = []
+                self._append_activity(f"Initial ranking failed: {exc}")
+        else:
             self.state.matches = []
+            self.state.match_error = ""
         self.render_current_view()
 
     def render_sidebar(self) -> None:
@@ -232,6 +261,9 @@ class JobMatchUI:
         self.render_current_view()
 
     def render_current_view(self) -> None:
+        self.scan_summary_panel = None
+        self.scan_log_panel = None
+        self.scan_log_widget = None
         self.content.clear()
         with self.content:
             if self.state.current_view == "dashboard":
@@ -281,6 +313,14 @@ class JobMatchUI:
                     self._stat_block("Sources", str(len(sources)))
                     self._stat_block("Matches", str(len(self.state.matches)))
                     self._stat_block("Last scan", self.last_scan_label.text.replace("Last scan: ", ""))
+
+            with ui.element("div").classes("scan-grid"):
+                with ui.element("section").classes("panel"):
+                    self.scan_summary_panel = ui.column().classes("w-full gap-3")
+                    self.render_scan_summary_panel()
+                with ui.element("section").classes("panel"):
+                    self.scan_log_panel = ui.column().classes("w-full gap-3")
+                    self.render_scan_log_panel()
 
             with ui.element("section").classes("panel results-shell"):
                 if self.state.match_error and not self.state.matches:
@@ -440,38 +480,147 @@ class JobMatchUI:
                     ).props("outlined").classes("w-full mt-3")
                     ui.label("Weights are normalized automatically, so they do not need to sum to 1.0.").classes("mt-3 muted-copy")
 
-    async def refresh_matches(self) -> None:
+    def render_scan_summary_panel(self) -> None:
+        if self.scan_summary_panel is None:
+            return
+        self.scan_summary_panel.clear()
+        totals = self._scan_totals()
+        with self.scan_summary_panel:
+            with ui.row().classes("w-full items-start justify-between"):
+                with ui.column().classes("gap-1"):
+                    ui.label("Scan Summary").classes("text-lg font-semibold")
+                    ui.label("Live status, per-source results, and the latest scan outcome.").classes("page-subtitle")
+                with ui.row().classes("scan-status-row"):
+                    if self.state.scan_running:
+                        ui.spinner(size="sm", color="primary")
+                    ui.label(self.state.scan_status).classes("font-medium")
+
+            if self.state.scan_error:
+                ui.label(f"Scan error: {self.state.scan_error}").classes("error-banner text-sm")
+            elif self.state.match_error:
+                ui.label(f"Last ranking error: {self.state.match_error}").classes("error-banner text-sm")
+            elif not self.state.scan_rows and self.state.recent_scans:
+                ui.label("No scan has run in this browser session yet. Recent stored activity is shown below.").classes(
+                    "info-banner text-sm"
+                )
+
+            with ui.element("div").classes("scan-metrics"):
+                self._stat_block("Progress", f"{self.state.scan_sources_finished}/{max(self.state.scan_source_total, len(self.state.scan_rows)) or 0}")
+                self._stat_block("New", str(totals["created"]))
+                self._stat_block("Updated", str(totals["updated"]))
+                self._stat_block("Unchanged", str(totals["unchanged"]))
+                self._stat_block("Errors", str(totals["errors"]))
+
+            if self.state.scan_rows:
+                rows = [self._scan_row_payload(row) for row in self.state.scan_rows]
+                ui.table(
+                    rows=rows,
+                    row_key="source",
+                    columns=[
+                        {"name": "source", "label": "Source", "field": "source"},
+                        {"name": "status", "label": "Status", "field": "status"},
+                        {"name": "pages", "label": "Pages", "field": "pages"},
+                        {"name": "jobs", "label": "Jobs", "field": "jobs"},
+                        {"name": "changes", "label": "Changes", "field": "changes"},
+                        {"name": "note", "label": "Notes", "field": "note"},
+                    ],
+                    pagination={"rowsPerPage": 6},
+                ).classes("w-full recent-scan-table").props("flat dense square separator=horizontal")
+            elif self.state.recent_scans:
+                rows = [self._recent_scan_row(scan) for scan in self.state.recent_scans[:8]]
+                ui.table(
+                    rows=rows,
+                    row_key="id",
+                    columns=[
+                        {"name": "source", "label": "Source", "field": "source"},
+                        {"name": "status", "label": "Status", "field": "status"},
+                        {"name": "finished", "label": "Finished", "field": "finished"},
+                        {"name": "changes", "label": "Changes", "field": "changes"},
+                    ],
+                    pagination={"rowsPerPage": 6},
+                ).classes("w-full recent-scan-table").props("flat dense square separator=horizontal")
+            else:
+                self._empty_state("No scan activity yet. Add sources, then run a scan.")
+
+    def render_scan_log_panel(self) -> None:
+        if self.scan_log_panel is None:
+            return
+        self.scan_log_panel.clear()
+        with self.scan_log_panel:
+            with ui.row().classes("w-full items-start justify-between"):
+                with ui.column().classes("gap-1"):
+                    ui.label("Activity Log").classes("text-lg font-semibold")
+                    ui.label("High-level events from scans and ranking runs.").classes("page-subtitle")
+                ui.label(datetime.now().strftime("%H:%M")).classes("muted-copy text-sm")
+
+            if not self.state.scan_log_lines:
+                self._empty_state("No activity logged yet.")
+                self.scan_log_widget = None
+                return
+
+            self.scan_log_widget = ui.log(max_lines=160).classes("w-full scan-log")
+            for line in self.state.scan_log_lines[-160:]:
+                self.scan_log_widget.push(line, classes="mono text-xs")
+
+    async def refresh_matches(self, *, record_activity: bool = True) -> None:
         self.status_label.set_text("Ranking jobs...")
+        if record_activity:
+            self._append_activity("Ranking cached jobs against the active resume.")
         try:
             self.state.matches = await asyncio.to_thread(self.engine.get_ranked_matches, self.current_filters())
             self.state.match_error = ""
+            if record_activity:
+                self._append_activity(f"Ranking finished: {len(self.state.matches)} match(es) ready.")
         except Exception as exc:
             self.state.matches = []
             self.state.match_error = str(exc)
-            ui.notify(str(exc), type="warning")
+            if record_activity:
+                self._append_activity(f"Ranking failed: {exc}")
         finally:
-            self.status_label.set_text("Ready")
+            self.status_label.set_text(self.state.scan_status if self.state.scan_running else "Ready")
+            self.render_scan_summary_panel()
+            self.render_scan_log_panel()
             self.render_current_view()
 
     async def handle_scan(self, *, background: bool = False) -> None:
+        if self.state.scan_running:
+            self._append_activity("Scan request ignored because a scan is already running.")
+            self.render_scan_log_panel()
+            return
         if self.scan_button:
             self.scan_button.disable()
+        self.state.scan_running = True
+        self.state.scan_error = ""
+        self.state.scan_status = "Scanning sources..."
+        self.state.scan_source_total = 0
+        self.state.scan_sources_finished = 0
+        self.state.scan_rows = []
         self.status_label.set_text("Scanning sources...")
+        self.render_scan_summary_panel()
+        self.render_scan_log_panel()
         try:
-            summary = await self.engine.scan_sources()
+            summary = await self.engine.scan_sources(on_progress=self._handle_scan_progress)
+            self._apply_scan_summary(summary)
+            self.state.scan_running = False
+            self.state.scan_status = self._scan_complete_status(summary)
             if summary.results:
                 self.last_scan_label.set_text(f"Last scan: {summary.finished_at:%Y-%m-%d %H:%M}")
-            if not background:
-                ui.notify(f"Scan finished: {summary.total_jobs} job(s) processed across {len(summary.results)} source(s).", type="positive")
-            await self.refresh_matches()
+            self.state.recent_scans = self.engine.list_recent_scans(limit=8)
+            await self.refresh_matches(record_activity=True)
         except Exception as exc:
-            ui.notify(f"Scan failed: {exc}", type="negative", multi_line=True)
+            self.state.scan_running = False
+            self.state.scan_error = str(exc)
             self.status_label.set_text("Scan failed")
+            self.state.scan_status = "Scan failed"
+            self._append_activity(f"Scan failed: {exc}")
         finally:
             if self.scan_button:
                 self.scan_button.enable()
+            self.state.recent_scans = self.engine.list_recent_scans(limit=8)
             if self.status_label.text == "Scanning sources...":
                 self.status_label.set_text("Ready")
+            self.render_scan_summary_panel()
+            self.render_scan_log_panel()
 
     async def schedule_tick(self) -> None:
         if self.engine.should_run_scheduled_scan():
@@ -481,12 +630,20 @@ class JobMatchUI:
         suffix = Path(event.file.name).suffix or ".pdf"
         incoming_path = UPLOADS_DIR / f"incoming-{safe_filename(Path(event.file.name).stem, suffix)}"
         await event.file.save(incoming_path)
+        self.status_label.set_text("Loading resume...")
+        self._append_activity(f"Importing resume {event.file.name}.")
         try:
             resume = await asyncio.to_thread(self.engine.save_resume, incoming_path)
-            ui.notify(f"Loaded resume: {resume.filename}", type="positive")
-            await self.refresh_matches()
+            self._append_activity(f"Loaded resume: {resume.filename}.")
+            self.render_sidebar()
+            await self.refresh_matches(record_activity=True)
         except Exception as exc:
-            ui.notify(f"Resume import failed: {exc}", type="negative", multi_line=True)
+            self.state.match_error = str(exc)
+            self._append_activity(f"Resume import failed: {exc}")
+            self.render_scan_summary_panel()
+            self.render_scan_log_panel()
+        finally:
+            self.status_label.set_text(self.state.scan_status if self.state.scan_running else "Ready")
 
     def select_source(self, row: dict | None) -> None:
         if not row:
@@ -576,6 +733,197 @@ class JobMatchUI:
             job_type=self.state.job_type,
             clearance_terms=self.state.clearance_terms,
         )
+
+    def _append_activity(self, message: str) -> None:
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        line = f"[{timestamp}] {message}"
+        self.state.scan_log_lines.append(line)
+        self.state.scan_log_lines = self.state.scan_log_lines[-160:]
+        if self.scan_log_widget is not None:
+            self.scan_log_widget.push(line, classes="mono text-xs")
+
+    def _handle_scan_progress(self, event: dict[str, Any]) -> None:
+        kind = str(event.get("event") or "")
+        if kind == "scan_started":
+            sources = list(event.get("sources") or [])
+            self.state.scan_source_total = int(event.get("source_count") or len(sources))
+            self.state.scan_sources_finished = 0
+            self.state.scan_status = f"Scanning 0/{self.state.scan_source_total} sources..."
+            self.state.scan_rows = [
+                self._new_scan_row(source.get("id"), source.get("name") or "Unnamed source")
+                for source in sources
+            ]
+            self._append_activity(f"Scan queued for {self.state.scan_source_total} source(s).")
+        elif kind == "source_started":
+            row = self._touch_scan_row(event.get("source_id"), event.get("source_name"))
+            row["status"] = "running"
+            row["note"] = f"Opening {event.get('source_type') or 'source'} feed"
+            self._append_activity(f"Scanning {row['source_name']}...")
+        elif kind == "source_page":
+            row = self._touch_scan_row(event.get("source_id"), event.get("source_name"))
+            row["pages_scanned"] = int(event.get("page") or row["pages_scanned"])
+            row["jobs_found"] = int(event.get("total_jobs") or row["jobs_found"])
+            row["note"] = (
+                f"Page {event.get('page')}: kept {event.get('jobs_kept', 0)}, "
+                f"{event.get('new_or_changed_jobs', 0)} new/changed, {event.get('known_jobs', 0)} known"
+            )
+            self._append_activity(f"{row['source_name']}: {row['note']}.")
+        elif kind == "source_detail":
+            row = self._touch_scan_row(event.get("source_id"), event.get("source_name"))
+            row["detail_pages_fetched"] += int(event.get("detail_pages") or 0)
+            row["note"] = f"Fetching {event.get('detail_pages', 0)} detail page(s) from page {event.get('page', '?')}"
+            self._append_activity(f"{row['source_name']}: {row['note']}.")
+        elif kind == "source_early_stop":
+            row = self._touch_scan_row(event.get("source_id"), event.get("source_name"))
+            row["stopped_early"] = True
+            row["note"] = f"Stopped early after page {event.get('page', '?')} because pages were mostly already known"
+            self._append_activity(f"{row['source_name']}: {row['note']}.")
+        elif kind == "source_finished":
+            row = self._touch_scan_row(event.get("source_id"), event.get("source_name"))
+            row["status"] = str(event.get("status") or "unknown")
+            row["pages_scanned"] = int(event.get("pages_scanned") or row["pages_scanned"])
+            row["jobs_found"] = int(event.get("jobs_found") or row["jobs_found"])
+            row["jobs_created"] = int(event.get("jobs_created") or 0)
+            row["jobs_updated"] = int(event.get("jobs_updated") or 0)
+            row["jobs_unchanged"] = int(event.get("jobs_unchanged") or 0)
+            row["jobs_deactivated"] = int(event.get("jobs_deactivated") or 0)
+            row["detail_pages_fetched"] = int(event.get("detail_pages_fetched") or row["detail_pages_fetched"])
+            row["stopped_early"] = bool(event.get("stopped_early") or row["stopped_early"])
+            row["error"] = str(event.get("error") or "")
+            row["note"] = self._source_finished_note(row)
+            self.state.scan_sources_finished = sum(
+                1 for scan_row in self.state.scan_rows if scan_row["status"] in {"ok", "not_modified", "error"}
+            )
+            self.state.scan_status = f"Scanning {self.state.scan_sources_finished}/{max(self.state.scan_source_total, 1)} sources..."
+            self._append_activity(
+                f"{row['source_name']}: {row['status']} ({row['jobs_created']} new, {row['jobs_updated']} updated, {row['jobs_unchanged']} unchanged)."
+            )
+        elif kind == "scan_finished":
+            self.state.scan_status = (
+                f"Scan complete: {event.get('total_created', 0)} new, "
+                f"{event.get('total_updated', 0)} updated, {event.get('error_count', 0)} error(s)"
+            )
+            self._append_activity(
+                f"Scan complete: {event.get('total_jobs', 0)} job(s), "
+                f"{event.get('total_created', 0)} new, {event.get('total_updated', 0)} updated."
+            )
+
+        if self.status_label is not None:
+            self.status_label.set_text(self.state.scan_status)
+        self.render_scan_summary_panel()
+        self.render_scan_log_panel()
+
+    def _apply_scan_summary(self, summary: ScanSummary) -> None:
+        self.state.scan_source_total = len(summary.results)
+        self.state.scan_sources_finished = len(summary.results)
+        self.state.scan_rows = [self._scan_result_row(result) for result in summary.results]
+
+    def _scan_complete_status(self, summary: ScanSummary) -> str:
+        return (
+            f"Scan complete: {summary.total_created} new, {summary.total_updated} updated, "
+            f"{summary.error_count} error(s)"
+        )
+
+    def _scan_totals(self) -> dict[str, int]:
+        return {
+            "created": sum(int(row["jobs_created"]) for row in self.state.scan_rows),
+            "updated": sum(int(row["jobs_updated"]) for row in self.state.scan_rows),
+            "unchanged": sum(int(row["jobs_unchanged"]) for row in self.state.scan_rows),
+            "errors": sum(1 for row in self.state.scan_rows if row["status"] == "error"),
+        }
+
+    def _touch_scan_row(self, source_id: Any, source_name: Any) -> dict[str, Any]:
+        for row in self.state.scan_rows:
+            if row["source_id"] == source_id and source_id is not None:
+                if source_name:
+                    row["source_name"] = str(source_name)
+                return row
+            if source_id is None and row["source_name"] == str(source_name or row["source_name"]):
+                return row
+        row = self._new_scan_row(source_id, str(source_name or "Unnamed source"))
+        self.state.scan_rows.append(row)
+        return row
+
+    @staticmethod
+    def _new_scan_row(source_id: Any, source_name: str) -> dict[str, Any]:
+        return {
+            "source_id": source_id,
+            "source_name": source_name,
+            "status": "queued",
+            "pages_scanned": 0,
+            "jobs_found": 0,
+            "jobs_created": 0,
+            "jobs_updated": 0,
+            "jobs_unchanged": 0,
+            "jobs_deactivated": 0,
+            "detail_pages_fetched": 0,
+            "stopped_early": False,
+            "note": "Waiting to start",
+            "error": "",
+        }
+
+    @staticmethod
+    def _source_finished_note(row: dict[str, Any]) -> str:
+        if row["status"] == "error" and row["error"]:
+            return row["error"]
+        note = (
+            f"{row['jobs_found']} job(s) across {row['pages_scanned']} page(s); "
+            f"{row['detail_pages_fetched']} detail page(s)"
+        )
+        if row["stopped_early"]:
+            note += "; stopped early after mostly-known pages"
+        return note
+
+    def _scan_result_row(self, result) -> dict[str, Any]:
+        return {
+            "source_id": result.source.id,
+            "source_name": result.source.name,
+            "status": result.status,
+            "pages_scanned": result.pages_scanned,
+            "jobs_found": len(result.jobs),
+            "jobs_created": result.jobs_created,
+            "jobs_updated": result.jobs_updated,
+            "jobs_unchanged": result.jobs_unchanged,
+            "jobs_deactivated": result.jobs_deactivated,
+            "detail_pages_fetched": result.detail_pages_fetched,
+            "stopped_early": result.stopped_early,
+            "note": result.error or self._source_finished_note(
+                {
+                    "status": result.status,
+                    "error": result.error or "",
+                    "jobs_found": len(result.jobs),
+                    "pages_scanned": result.pages_scanned,
+                    "detail_pages_fetched": result.detail_pages_fetched,
+                    "stopped_early": result.stopped_early,
+                }
+            ),
+            "error": result.error or "",
+        }
+
+    @staticmethod
+    def _scan_row_payload(row: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "source": row["source_name"],
+            "status": str(row["status"]).replace("_", " "),
+            "pages": row["pages_scanned"] or "-",
+            "jobs": row["jobs_found"],
+            "changes": f"+{row['jobs_created']} / ~{row['jobs_updated']} / ={row['jobs_unchanged']}",
+            "note": row["note"],
+        }
+
+    @staticmethod
+    def _recent_scan_row(scan: dict[str, Any]) -> dict[str, Any]:
+        finished = scan.get("finished_at")
+        finished_text = finished.strftime("%m-%d %H:%M") if finished else "running"
+        return {
+            "id": scan["id"],
+            "source": scan.get("source_name") or f"Source #{scan.get('source_id')}",
+            "status": str(scan.get("status") or "unknown").replace("_", " "),
+            "finished": finished_text,
+            "changes": (
+                f"+{scan.get('jobs_created', 0)} / ~{scan.get('jobs_updated', 0)} / ={scan.get('jobs_unchanged', 0)}"
+            ),
+        }
 
     def _render_results_table(self, matches: list[MatchResult]) -> None:
         rows = [self._match_row(match) for match in matches]

@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import re
+from collections.abc import Callable
 from typing import Any
 
 import httpx
@@ -57,10 +58,12 @@ class JobFetcher:
         source: JobSourceConfig,
         max_jobs: int = 120,
         known_jobs: dict[str, dict[str, Any]] | None = None,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
     ) -> ScanResult:
         source_type = self._determine_source_type(source)
         source.source_type = source_type
         throttle = SourceThrottle(source.request_delay_ms)
+        diagnostics = {"pages_scanned": 0, "detail_pages_fetched": 0, "stopped_early": False}
         try:
             raw_jobs, etag, last_modified, not_modified = await self._fetch_jobs(
                 source,
@@ -68,9 +71,19 @@ class JobFetcher:
                 max_jobs=max_jobs,
                 known_jobs=known_jobs or {},
                 throttle=throttle,
+                progress_callback=progress_callback,
+                diagnostics=diagnostics,
             )
             if not_modified:
-                return ScanResult(source=source, status="not_modified", response_etag=etag, response_last_modified=last_modified)
+                return ScanResult(
+                    source=source,
+                    status="not_modified",
+                    response_etag=etag,
+                    response_last_modified=last_modified,
+                    pages_scanned=int(diagnostics["pages_scanned"]),
+                    detail_pages_fetched=int(diagnostics["detail_pages_fetched"]),
+                    stopped_early=bool(diagnostics["stopped_early"]),
+                )
 
             normalized_jobs: list[NormalizedJob] = []
             for payload in raw_jobs[:max_jobs]:
@@ -84,10 +97,20 @@ class JobFetcher:
                 jobs=normalized_jobs,
                 response_etag=etag,
                 response_last_modified=last_modified,
+                pages_scanned=int(diagnostics["pages_scanned"]),
+                detail_pages_fetched=int(diagnostics["detail_pages_fetched"]),
+                stopped_early=bool(diagnostics["stopped_early"]),
             )
         except Exception as exc:
             logger.exception("Source scan failed for %s", source.name)
-            return ScanResult(source=source, status="error", error=str(exc))
+            return ScanResult(
+                source=source,
+                status="error",
+                error=str(exc),
+                pages_scanned=int(diagnostics["pages_scanned"]),
+                detail_pages_fetched=int(diagnostics["detail_pages_fetched"]),
+                stopped_early=bool(diagnostics["stopped_early"]),
+            )
 
     async def _fetch_jobs(
         self,
@@ -97,22 +120,51 @@ class JobFetcher:
         max_jobs: int,
         known_jobs: dict[str, dict[str, Any]],
         throttle: SourceThrottle,
+        progress_callback: Callable[[dict[str, Any]], None] | None,
+        diagnostics: dict[str, Any],
     ) -> tuple[list[dict[str, Any]], str | None, str | None, bool]:
         if source_type == "greenhouse":
-            return await self._fetch_greenhouse(source, throttle)
+            return await self._fetch_greenhouse(source, throttle, diagnostics=diagnostics)
         if source_type == "lever":
-            return await self._fetch_lever(source, throttle)
+            return await self._fetch_lever(source, throttle, diagnostics=diagnostics)
         if source_type == "indeed":
-            return await self._fetch_search_page(source, parser="indeed", max_jobs=max_jobs, known_jobs=known_jobs, throttle=throttle)
+            return await self._fetch_search_page(
+                source,
+                parser="indeed",
+                max_jobs=max_jobs,
+                known_jobs=known_jobs,
+                throttle=throttle,
+                progress_callback=progress_callback,
+                diagnostics=diagnostics,
+            )
         if source_type == "clearance":
-            return await self._fetch_search_page(source, parser="clearance", max_jobs=max_jobs, known_jobs=known_jobs, throttle=throttle)
-        return await self._fetch_search_page(source, parser="generic", max_jobs=max_jobs, known_jobs=known_jobs, throttle=throttle)
+            return await self._fetch_search_page(
+                source,
+                parser="clearance",
+                max_jobs=max_jobs,
+                known_jobs=known_jobs,
+                throttle=throttle,
+                progress_callback=progress_callback,
+                diagnostics=diagnostics,
+            )
+        return await self._fetch_search_page(
+            source,
+            parser="generic",
+            max_jobs=max_jobs,
+            known_jobs=known_jobs,
+            throttle=throttle,
+            progress_callback=progress_callback,
+            diagnostics=diagnostics,
+        )
 
     async def _fetch_greenhouse(
         self,
         source: JobSourceConfig,
         throttle: SourceThrottle,
+        *,
+        diagnostics: dict[str, Any],
     ) -> tuple[list[dict[str, Any]], str | None, str | None, bool]:
+        diagnostics["pages_scanned"] = 1
         identifier = source.identifier or self._extract_greenhouse_identifier(source.url)
         if not identifier:
             raise ValueError("Greenhouse source requires a board token or board URL.")
@@ -138,7 +190,10 @@ class JobFetcher:
         self,
         source: JobSourceConfig,
         throttle: SourceThrottle,
+        *,
+        diagnostics: dict[str, Any],
     ) -> tuple[list[dict[str, Any]], str | None, str | None, bool]:
+        diagnostics["pages_scanned"] = 1
         identifier = source.identifier or self._extract_lever_identifier(source.url)
         if not identifier:
             raise ValueError("Lever source requires a company slug or postings URL.")
@@ -175,6 +230,8 @@ class JobFetcher:
         max_jobs: int,
         known_jobs: dict[str, dict[str, Any]],
         throttle: SourceThrottle,
+        progress_callback: Callable[[dict[str, Any]], None] | None,
+        diagnostics: dict[str, Any],
     ) -> tuple[list[dict[str, Any]], str | None, str | None, bool]:
         url = source.url
         first_response: httpx.Response | None = None
@@ -188,6 +245,7 @@ class JobFetcher:
 
         while url and page_number < max_pages and len(all_jobs) < max_jobs:
             page_number += 1
+            diagnostics["pages_scanned"] = page_number
             response = await self._request_text(source, url, throttle=throttle)
             if page_number == 1 and response.status_code == 304:
                 return [], response.headers.get("etag"), response.headers.get("last-modified"), True
@@ -225,11 +283,31 @@ class JobFetcher:
             jobs_requiring_detail = [job for job in prepared_jobs if job.get("_requires_detail")]
             if remaining_detail_budget > 0 and jobs_requiring_detail:
                 detail_batch = jobs_requiring_detail[:remaining_detail_budget]
+                diagnostics["detail_pages_fetched"] = int(diagnostics["detail_pages_fetched"]) + len(detail_batch)
+                self._emit_progress(
+                    progress_callback,
+                    event="source_detail",
+                    source_id=source.id,
+                    source_name=source.name,
+                    detail_pages=len(detail_batch),
+                    page=page_number,
+                )
                 await self._enrich_detail_pages(detail_batch, source, throttle=throttle)
                 remaining_detail_budget = max(0, remaining_detail_budget - len(detail_batch))
 
             all_jobs.extend(prepared_jobs)
             new_or_changed_count = len(prepared_jobs) - known_count
+            self._emit_progress(
+                progress_callback,
+                event="source_page",
+                source_id=source.id,
+                source_name=source.name,
+                page=page_number,
+                jobs_kept=len(prepared_jobs),
+                known_jobs=known_count,
+                new_or_changed_jobs=new_or_changed_count,
+                total_jobs=len(all_jobs),
+            )
 
             if self._is_mostly_known_page(prepared_jobs, known_count, new_or_changed_count):
                 consecutive_known_pages += 1
@@ -240,10 +318,18 @@ class JobFetcher:
                 page_number >= DEFAULT_EARLY_STOP_MIN_PAGES
                 and consecutive_known_pages >= DEFAULT_EARLY_STOP_CONSECUTIVE_PAGES
             ):
+                diagnostics["stopped_early"] = True
                 logger.info(
                     "Stopping early for %s after %s pages because recent pages were mostly known jobs.",
                     source.name,
                     page_number,
+                )
+                self._emit_progress(
+                    progress_callback,
+                    event="source_early_stop",
+                    source_id=source.id,
+                    source_name=source.name,
+                    page=page_number,
                 )
                 break
 
@@ -543,6 +629,18 @@ class JobFetcher:
         if last_error:
             raise last_error
         raise RuntimeError(f"Request failed for {url}")
+
+    @staticmethod
+    def _emit_progress(
+        progress_callback: Callable[[dict[str, Any]], None] | None,
+        **event: Any,
+    ) -> None:
+        if progress_callback is None:
+            return
+        try:
+            progress_callback(event)
+        except Exception:
+            logger.debug("Ignoring scan progress callback failure.", exc_info=True)
 
     async def _sleep_with_backoff(self, source: JobSourceConfig, attempt: int) -> None:
         base_delay = max(source.request_delay_ms, 250) / 1000

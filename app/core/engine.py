@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import csv
 import json
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -24,6 +25,7 @@ class JobMatchEngine:
         self.resume_parser = ResumeParser()
         self.job_fetcher = JobFetcher(JobNormalizer())
         self._scan_lock = asyncio.Lock()
+        self._matcher_cache: dict[tuple[str, float, float, float], JobMatcher] = {}
 
     def save_resume(self, source_path: str | Path) -> ResumeProfile:
         path = Path(source_path)
@@ -52,7 +54,11 @@ class JobMatchEngine:
     def update_settings(self, values: dict) -> None:
         self.storage.update_settings(values)
 
-    async def scan_sources(self, source_ids: list[int] | None = None) -> ScanSummary:
+    async def scan_sources(
+        self,
+        source_ids: list[int] | None = None,
+        on_progress: Callable[[dict], None] | None = None,
+    ) -> ScanSummary:
         async with self._scan_lock:
             sources = [source for source in self.storage.list_sources() if source.enabled]
             if source_ids:
@@ -60,6 +66,16 @@ class JobMatchEngine:
             started_at = datetime.now(UTC)
             if not sources:
                 return ScanSummary(started_at=started_at, finished_at=datetime.now(UTC), results=[])
+            self._emit_progress(
+                on_progress,
+                event="scan_started",
+                started_at=started_at,
+                source_count=len(sources),
+                sources=[
+                    {"id": source.id, "name": source.name, "source_type": source.source_type}
+                    for source in sources
+                ],
+            )
 
             settings = self.get_settings()
             max_jobs = int(settings.get("max_source_jobs", DEFAULT_SETTINGS["max_source_jobs"]))
@@ -67,9 +83,21 @@ class JobMatchEngine:
 
             async def run_scan(source: JobSourceConfig):
                 async with semaphore:
+                    self._emit_progress(
+                        on_progress,
+                        event="source_started",
+                        source_id=source.id,
+                        source_name=source.name,
+                        source_type=source.source_type,
+                    )
                     scan_id = self.storage.begin_scan(source.id)
                     known_jobs = self.storage.get_source_job_index(source.id or 0)
-                    result = await self.job_fetcher.scan_source(source, max_jobs=max_jobs, known_jobs=known_jobs)
+                    result = await self.job_fetcher.scan_source(
+                        source,
+                        max_jobs=max_jobs,
+                        known_jobs=known_jobs,
+                        progress_callback=on_progress,
+                    )
                     if result.status == "ok":
                         created, updated, unchanged, deactivated = self.storage.upsert_jobs(source, result.jobs)
                         result.jobs_created = created
@@ -102,10 +130,40 @@ class JobMatchEngine:
                     else:
                         self.storage.update_source_scan_state(source.id or 0, status=result.status)
                         self.storage.finish_scan(scan_id, status=result.status, error_text=result.error)
+                    self._emit_progress(
+                        on_progress,
+                        event="source_finished",
+                        source_id=source.id,
+                        source_name=source.name,
+                        status=result.status,
+                        jobs_found=len(result.jobs),
+                        jobs_created=result.jobs_created,
+                        jobs_updated=result.jobs_updated,
+                        jobs_unchanged=result.jobs_unchanged,
+                        jobs_deactivated=result.jobs_deactivated,
+                        pages_scanned=result.pages_scanned,
+                        detail_pages_fetched=result.detail_pages_fetched,
+                        stopped_early=result.stopped_early,
+                        error=result.error,
+                    )
                     return result
 
             results = await asyncio.gather(*(run_scan(source) for source in sources))
-            return ScanSummary(started_at=started_at, finished_at=datetime.now(UTC), results=list(results))
+            summary = ScanSummary(started_at=started_at, finished_at=datetime.now(UTC), results=list(results))
+            self._emit_progress(
+                on_progress,
+                event="scan_finished",
+                started_at=summary.started_at,
+                finished_at=summary.finished_at,
+                source_count=len(summary.results),
+                total_jobs=summary.total_jobs,
+                total_created=summary.total_created,
+                total_updated=summary.total_updated,
+                total_unchanged=summary.total_unchanged,
+                total_deactivated=summary.total_deactivated,
+                error_count=summary.error_count,
+            )
+            return summary
 
     def get_ranked_matches(self, filters: FilterCriteria | None = None) -> list[MatchResult]:
         filters = filters or FilterCriteria()
@@ -119,7 +177,7 @@ class JobMatchEngine:
             skill=float(settings.get("skill_weight", DEFAULT_SETTINGS["skill_weight"])),
             experience=float(settings.get("experience_weight", DEFAULT_SETTINGS["experience_weight"])),
         )
-        matcher = JobMatcher(str(settings.get("embedding_model_name", DEFAULT_SETTINGS["embedding_model_name"])), weights)
+        matcher = self._get_matcher(str(settings.get("embedding_model_name", DEFAULT_SETTINGS["embedding_model_name"])), weights)
         jobs = self._deduplicate_jobs(jobs)
         resume, jobs, job_embeddings = matcher.ensure_embeddings(resume, jobs)
         if resume.id and resume.embedding:
@@ -194,6 +252,29 @@ class JobMatchEngine:
 
     def list_recent_scans(self, limit: int = 25) -> list[dict]:
         return self.storage.list_scans(limit=limit)
+
+    def _get_matcher(self, model_name: str, weights: MatchWeights) -> JobMatcher:
+        normalized = weights.normalized()
+        cache_key = (
+            model_name,
+            round(normalized.embedding, 6),
+            round(normalized.skill, 6),
+            round(normalized.experience, 6),
+        )
+        matcher = self._matcher_cache.get(cache_key)
+        if matcher is None:
+            matcher = JobMatcher(model_name, normalized)
+            self._matcher_cache[cache_key] = matcher
+        return matcher
+
+    @staticmethod
+    def _emit_progress(on_progress: Callable[[dict], None] | None, **event: object) -> None:
+        if on_progress is None:
+            return
+        try:
+            on_progress(event)
+        except Exception:
+            return
 
     @staticmethod
     def _deduplicate_jobs(jobs: list) -> list:
