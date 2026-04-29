@@ -258,6 +258,32 @@ class JobMatchUI:
 
         task.add_done_callback(cleanup)
 
+    def _notify(
+        self,
+        message: Any,
+        *,
+        position: str = "bottom",
+        close_button: bool | str = False,
+        type: str | None = None,
+        color: str | None = None,
+        multi_line: bool = False,
+        **kwargs: Any,
+    ) -> None:
+        if self._client_deleted or self.client is None:
+            return
+        options = {
+            "message": str(message),
+            "position": position,
+            "closeBtn": close_button,
+            "multiLine": multi_line,
+        }
+        if type is not None:
+            options["type"] = type
+        if color is not None:
+            options["color"] = color
+        options.update(kwargs)
+        self.client.outbox.enqueue_message("notify", options, self.client.id)
+
     def _handle_client_delete(self) -> None:
         self._client_deleted = True
         for task in list(self._background_tasks):
@@ -503,7 +529,7 @@ class JobMatchUI:
                             label="Upload saved HTML",
                             auto_upload=True,
                             on_upload=lambda e: asyncio.create_task(self.handle_source_html_upload(e)),
-                            on_rejected=lambda: ui.notify("Saved HTML upload rejected.", type="negative"),
+                            on_rejected=lambda: self._notify("Saved HTML upload rejected.", type="negative"),
                         ).props("accept=.html,.htm,text/html bordered").classes("w-full mt-3")
                         self.source_inputs["manual_job_urls"] = ui.textarea(
                             "Paste job URLs",
@@ -531,7 +557,7 @@ class JobMatchUI:
                         auto_upload=True,
                         max_file_size=20_000_000,
                         on_upload=lambda e: asyncio.create_task(self.handle_resume_upload(e)),
-                        on_rejected=lambda: ui.notify("Resume upload rejected.", type="negative"),
+                        on_rejected=lambda: self._notify("Resume upload rejected.", type="negative"),
                     ).props("accept=.pdf,.docx,.txt bordered").classes("w-full")
                     ui.label("Supported formats: PDF and DOCX. The active resume is parsed and stored locally.").classes("mt-3 muted-copy")
 
@@ -854,7 +880,7 @@ class JobMatchUI:
             notes=self.source_inputs["notes"].value or "",
         )
         if not payload.name or not payload.url:
-            ui.notify("Name and URL are required for a source.", type="warning")
+            self._notify("Name and URL are required for a source.", type="warning")
             return
         saved = self.engine.save_source(payload)
         self.state.selected_source_id = saved.id
@@ -872,28 +898,28 @@ class JobMatchUI:
             "request_delay_ms": saved.request_delay_ms,
             "notes": saved.notes,
         }
-        ui.notify(f"Saved source: {saved.name}", type="positive")
+        self._notify(f"Saved source: {saved.name}", type="positive")
         self.render_sidebar()
         self.render_current_view()
 
     def delete_selected_source(self) -> None:
         if not self.state.selected_source_id:
-            ui.notify("Select a source first.", type="warning")
+            self._notify("Select a source first.", type="warning")
             return
         self.engine.delete_source(self.state.selected_source_id)
-        ui.notify("Source deleted.", type="positive")
+        self._notify("Source deleted.", type="positive")
         self.reset_source_form()
         self.render_sidebar()
 
     def save_settings(self) -> None:
         values = {key: element.value for key, element in self.settings_inputs.items()}
         self.engine.update_settings(values)
-        ui.notify("Settings saved.", type="positive")
+        self._notify("Settings saved.", type="positive")
 
     async def handle_source_discovery(self) -> None:
         query = self.state.discovery_query.strip()
         if not query:
-            ui.notify("Enter a company name, homepage, or careers URL first.", type="warning")
+            self._notify("Enter a company name, homepage, or careers URL first.", type="warning")
             return
         self.status_label.set_text("Discovering sources...")
         self._append_activity(f"Discovering source candidates for {query}.")
@@ -902,14 +928,14 @@ class JobMatchUI:
             self.state.discovery_results = [self._candidate_to_dict(candidate) for candidate in candidates]
             if candidates:
                 self._append_activity(f"Discovery found {len(candidates)} candidate source(s) for {query}.")
-                ui.notify(f"Found {len(candidates)} candidate source(s).", type="positive")
+                self._notify(f"Found {len(candidates)} candidate source(s).", type="positive")
             else:
                 self._append_activity(f"Discovery found no candidates for {query}.")
-                ui.notify("No candidates found from that query.", type="warning")
+                self._notify("No candidates found from that query.", type="warning")
             self.render_current_view()
         except Exception as exc:
             self._append_activity(f"Source discovery failed for {query}: {exc}")
-            ui.notify(f"Source discovery failed: {exc}", type="negative")
+            self._notify(f"Source discovery failed: {exc}", type="negative")
         finally:
             self.status_label.set_text(self.state.scan_status if self.state.scan_running else "Ready")
             self.render_scan_log_panel()
@@ -960,21 +986,21 @@ class JobMatchUI:
         self._append_activity(f"Saved discovered source {saved.name} ({saved.url}).")
         self.render_sidebar()
         self.render_current_view()
-        ui.notify(f"Saved source: {saved.name}", type="positive")
+        self._notify(f"Saved source: {saved.name}", type="positive")
 
     def open_selected_source_browser(self) -> None:
         source = self._selected_source()
         if source is None:
-            ui.notify("Select a source first.", type="warning")
+            self._notify("Select a source first.", type="warning")
             return
         browser_name = self.engine.open_source_in_browser_profile(source.id or 0)
         self._append_activity(f"Opened {source.name} in the dedicated {browser_name} profile.")
         self.render_scan_log_panel()
-        ui.notify(f"Opened in {browser_name}.", type="positive")
+        self._notify(f"Opened in {browser_name}.", type="positive")
 
     def handle_export(self, export_format: str) -> None:
         if not self.state.matches:
-            ui.notify("Nothing to export yet.", type="warning")
+            self._notify("Nothing to export yet.", type="warning")
             return
         path = self.engine.export_matches(export_format, self.state.matches)
         ui.download(path)
@@ -997,7 +1023,7 @@ class JobMatchUI:
     async def handle_manual_source_import(self) -> None:
         source = self._selected_source()
         if source is None:
-            ui.notify("Select a source first.", type="warning")
+            self._notify("Select a source first.", type="warning")
             return
         self.status_label.set_text("Importing source page...")
         self._append_activity(f"Manual import started for {source.name} from the saved source page.")
@@ -1008,12 +1034,12 @@ class JobMatchUI:
                 f"Manual import finished for {source.name}: {result.jobs_created} new, {result.jobs_updated} updated, {result.jobs_unchanged} unchanged."
             )
             await self.refresh_matches(record_activity=False)
-            ui.notify(f"Imported {len(result.jobs)} jobs from the source page.", type="positive")
+            self._notify(f"Imported {len(result.jobs)} jobs from the source page.", type="positive")
             self.render_sidebar()
             self.render_current_view()
         except Exception as exc:
             self._append_activity(f"Manual source import failed for {source.name}: {exc}")
-            ui.notify(f"Manual source import failed: {exc}", type="negative")
+            self._notify(f"Manual source import failed: {exc}", type="negative")
         finally:
             self.status_label.set_text(self.state.scan_status if self.state.scan_running else "Ready")
             self.render_scan_log_panel()
@@ -1021,7 +1047,7 @@ class JobMatchUI:
     async def handle_source_html_upload(self, event: events.UploadEventArguments) -> None:
         source = self._selected_source()
         if source is None:
-            ui.notify("Select a source first.", type="warning")
+            self._notify("Select a source first.", type="warning")
             return
         incoming_path = UPLOADS_DIR / f"manual-source-{source.id or 0}-{safe_filename(Path(event.file.name).stem, '.html')}"
         await event.file.save(incoming_path)
@@ -1035,12 +1061,12 @@ class JobMatchUI:
                 f"Saved HTML import finished for {source.name}: {result.jobs_created} new, {result.jobs_updated} updated, {result.jobs_unchanged} unchanged."
             )
             await self.refresh_matches(record_activity=False)
-            ui.notify(f"Imported {len(result.jobs)} jobs from saved HTML.", type="positive")
+            self._notify(f"Imported {len(result.jobs)} jobs from saved HTML.", type="positive")
             self.render_sidebar()
             self.render_current_view()
         except Exception as exc:
             self._append_activity(f"Saved HTML import failed for {source.name}: {exc}")
-            ui.notify(f"Saved HTML import failed: {exc}", type="negative")
+            self._notify(f"Saved HTML import failed: {exc}", type="negative")
         finally:
             self.status_label.set_text(self.state.scan_status if self.state.scan_running else "Ready")
             self.render_scan_log_panel()
@@ -1048,11 +1074,11 @@ class JobMatchUI:
     async def handle_job_url_import(self) -> None:
         source = self._selected_source()
         if source is None:
-            ui.notify("Select a source first.", type="warning")
+            self._notify("Select a source first.", type="warning")
             return
         urls = [line.strip() for line in self.state.manual_job_urls.splitlines() if line.strip()]
         if not urls:
-            ui.notify("Paste at least one job URL.", type="warning")
+            self._notify("Paste at least one job URL.", type="warning")
             return
         self.status_label.set_text("Importing job URLs...")
         self._append_activity(f"Manual URL import started for {source.name}: {len(urls)} URL(s).")
@@ -1063,13 +1089,13 @@ class JobMatchUI:
                 f"URL import finished for {source.name}: {result.jobs_created} new, {result.jobs_updated} updated, {result.jobs_unchanged} unchanged."
             )
             await self.refresh_matches(record_activity=False)
-            ui.notify(f"Imported {len(result.jobs)} jobs from pasted URLs.", type="positive")
+            self._notify(f"Imported {len(result.jobs)} jobs from pasted URLs.", type="positive")
             self.state.manual_job_urls = ""
             self.render_sidebar()
             self.render_current_view()
         except Exception as exc:
             self._append_activity(f"URL import failed for {source.name}: {exc}")
-            ui.notify(f"URL import failed: {exc}", type="negative")
+            self._notify(f"URL import failed: {exc}", type="negative")
         finally:
             self.status_label.set_text(self.state.scan_status if self.state.scan_running else "Ready")
             self.render_scan_log_panel()
