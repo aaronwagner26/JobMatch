@@ -1,5 +1,5 @@
 param(
-    [string]$Host = "0.0.0.0",
+    [string]$BindHost = "0.0.0.0",
     [int]$Port = 8181
 )
 
@@ -79,7 +79,7 @@ try {
         & $SetupScript
     }
 
-    if ($Host -eq "0.0.0.0") {
+    if ($BindHost -eq "0.0.0.0") {
         $lanIp = Get-PrimaryIPv4
         if ($lanIp) {
             Write-Host "Starting JobMatch on:"
@@ -91,10 +91,10 @@ try {
         }
     }
     else {
-        Write-Host "Starting JobMatch on http://$Host`:$Port/"
+        Write-Host "Starting JobMatch on http://$BindHost`:$Port/"
     }
 
-    & py -3.12 -m app.ui.main --host $Host --port $Port
+    & py -3.12 -m app.ui.main --host $BindHost --port $Port
 }
 finally {
     Pop-Location
