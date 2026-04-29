@@ -1,4 +1,5 @@
 param(
+    [string]$Host = "0.0.0.0",
     [int]$Port = 8181
 )
 
@@ -55,6 +56,21 @@ sys.exit(0 if not missing else 1)
     return Test-Python312Command -Arguments @("-c", $probe)
 }
 
+function Get-PrimaryIPv4 {
+    $addresses = Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.IPAddress -notlike "127.*" -and
+            $_.IPAddress -notlike "169.254.*" -and
+            $_.PrefixOrigin -ne "WellKnown"
+        } |
+        Sort-Object SkipAsSource, InterfaceMetric
+
+    if ($addresses) {
+        return $addresses[0].IPAddress
+    }
+    return $null
+}
+
 Push-Location $RepoRoot
 
 try {
@@ -63,8 +79,22 @@ try {
         & $SetupScript
     }
 
-    Write-Host "Starting JobMatch on http://127.0.0.1:$Port/"
-    & py -3.12 -m app.ui.main --port $Port
+    if ($Host -eq "0.0.0.0") {
+        $lanIp = Get-PrimaryIPv4
+        if ($lanIp) {
+            Write-Host "Starting JobMatch on:"
+            Write-Host "  Local: http://127.0.0.1:$Port/"
+            Write-Host "  LAN:   http://$lanIp`:$Port/"
+        }
+        else {
+            Write-Host "Starting JobMatch on http://127.0.0.1:$Port/"
+        }
+    }
+    else {
+        Write-Host "Starting JobMatch on http://$Host`:$Port/"
+    }
+
+    & py -3.12 -m app.ui.main --host $Host --port $Port
 }
 finally {
     Pop-Location

@@ -681,16 +681,27 @@ def _resolve_port(port: int | None) -> int:
     return 8181
 
 
+def _resolve_host(host: str | None) -> str:
+    if host:
+        return host
+    env_host = os.getenv("JOBMATCH_HOST")
+    if env_host:
+        return env_host
+    return "0.0.0.0"
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run the JobMatch NiceGUI app.")
+    parser.add_argument("--host", type=str, default=None, help="Host interface to bind the local web app to.")
     parser.add_argument("--port", type=int, default=None, help="Port to bind the local web app to.")
     return parser.parse_args()
 
 
-def run(port: int | None = None) -> None:
+def run(port: int | None = None, host: str | None = None) -> None:
     ui.run(
         title=APP_NAME,
         dark=False,
+        host=_resolve_host(host),
         reload=False,
         show_welcome_message=False,
         port=_resolve_port(port),
@@ -699,4 +710,4 @@ def run(port: int | None = None) -> None:
 
 if __name__ in {"__main__", "__mp_main__"}:
     args = _parse_args()
-    run(port=args.port)
+    run(port=args.port, host=args.host)

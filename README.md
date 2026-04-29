@@ -31,6 +31,8 @@ powershell -ExecutionPolicy Bypass -File .\run_jobmatch.ps1
 The launcher script runs from the repo folder automatically and will trigger setup on first launch if Python 3.12 does not have the required packages yet.
 Setup logs are written to `data/logs/setup-*.log` so you can inspect the exact pip step if first-run installation is slow or fails.
 
+To access the app from another machine on the same network, run it on the host machine and open the printed LAN URL in the other machine's browser.
+
 To use a different port:
 
 ```powershell
