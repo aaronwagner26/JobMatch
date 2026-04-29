@@ -1,5 +1,5 @@
 param(
-    [string]$BindHost = "127.0.0.1",
+    [string]$BindHost = "",
     [int]$Port = 8181
 )
 
@@ -71,6 +71,48 @@ function Get-PrimaryIPv4 {
     return $null
 }
 
+function Get-JobMatchPythonProcesses {
+    return Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.Name -eq "python.exe" -and
+            $_.CommandLine -like "*-m app.ui.main*"
+        }
+}
+
+function Stop-JobMatchPythonProcesses {
+    $processes = @(Get-JobMatchPythonProcesses)
+    if (-not $processes) {
+        return
+    }
+
+    foreach ($process in $processes) {
+        Write-Host "Stopping previous JobMatch process $($process.ProcessId)..."
+        Stop-Process -Id $process.ProcessId -Force -ErrorAction SilentlyContinue
+    }
+
+    Start-Sleep -Milliseconds 750
+}
+
+function Assert-PortAvailable {
+    param(
+        [Parameter(Mandatory = $true)]
+        [int]$TargetPort
+    )
+
+    $connections = @(Get-NetTCPConnection -LocalPort $TargetPort -ErrorAction SilentlyContinue)
+    if (-not $connections) {
+        return
+    }
+
+    $owners = $connections | Select-Object -ExpandProperty OwningProcess -Unique
+    if (-not $owners) {
+        return
+    }
+
+    $ownerText = ($owners | ForEach-Object { "PID $_" }) -join ", "
+    throw "Port $TargetPort is still in use by $ownerText. Stop that process or choose a different port."
+}
+
 Push-Location $RepoRoot
 
 try {
@@ -79,22 +121,25 @@ try {
         & $SetupScript
     }
 
-    if ($BindHost -eq "0.0.0.0") {
-        $lanIp = Get-PrimaryIPv4
-        if ($lanIp) {
-            Write-Host "Starting JobMatch on:"
-            Write-Host "  Local: http://127.0.0.1:$Port/"
-            Write-Host "  LAN:   http://$lanIp`:$Port/"
+    $ResolvedBindHost = $BindHost
+    if (-not $ResolvedBindHost) {
+        $ResolvedBindHost = Get-PrimaryIPv4
+        if (-not $ResolvedBindHost) {
+            $ResolvedBindHost = "127.0.0.1"
         }
-        else {
-            Write-Host "Starting JobMatch on http://127.0.0.1:$Port/"
-        }
-    }
-    else {
-        Write-Host "Starting JobMatch on http://$BindHost`:$Port/"
     }
 
-    & py -3.12 -m app.ui.main --host $BindHost --port $Port
+    Stop-JobMatchPythonProcesses
+    Assert-PortAvailable -TargetPort $Port
+
+    if ($ResolvedBindHost -eq "127.0.0.1") {
+        Write-Host "Starting JobMatch on http://127.0.0.1:$Port/"
+    }
+    else {
+        Write-Host "Starting JobMatch on http://$ResolvedBindHost`:$Port/"
+    }
+
+    & py -3.12 -m app.ui.main --host $ResolvedBindHost --port $Port
 }
 finally {
     Pop-Location
