@@ -1,0 +1,3 @@
+[console_scripts]
+jobmatch = app.cli:main
+jobmatch-ui = app.ui.main:run
