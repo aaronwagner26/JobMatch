@@ -3,6 +3,7 @@ $RepoRoot = $PSScriptRoot
 $LogDir = Join-Path $RepoRoot "data\logs"
 New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 $LogFile = Join-Path $LogDir ("setup-{0}.log" -f (Get-Date -Format "yyyyMMdd-HHmmss"))
+$RequirementsFile = Join-Path $RepoRoot "requirements.txt"
 
 function Write-Log {
     param(
@@ -68,9 +69,9 @@ try {
         Invoke-Python312 -Arguments @("-m", "ensurepip", "--upgrade")
     }
 
-    Write-Log "Installing JobMatch in editable mode..."
+    Write-Log "Installing JobMatch Python dependencies..."
     Write-Log "First-time dependency install can take several minutes because sentence-transformers pulls torch."
-    Invoke-Python312 -Arguments @("-m", "pip", "install", "--disable-pip-version-check", "--verbose", "-e", ".")
+    Invoke-Python312 -Arguments @("-m", "pip", "install", "--disable-pip-version-check", "--verbose", "-r", $RequirementsFile)
 
     Write-Log "Installing Playwright Chromium..."
     Invoke-Python312 -Arguments @("-m", "playwright", "install", "chromium")

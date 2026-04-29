@@ -30,10 +30,35 @@ function Test-Python312Command {
     }
 }
 
+function Test-JobMatchDependencies {
+    $probe = @"
+import importlib.util
+import sys
+
+modules = [
+    'bs4',
+    'httpx',
+    'nicegui',
+    'playwright',
+    'fitz',
+    'docx',
+    'dateutil',
+    'sklearn',
+    'sentence_transformers',
+    'sqlalchemy',
+]
+
+missing = [name for name in modules if importlib.util.find_spec(name) is None]
+sys.exit(0 if not missing else 1)
+"@
+
+    return Test-Python312Command -Arguments @("-c", $probe)
+}
+
 Push-Location $RepoRoot
 
 try {
-    if (-not (Test-Python312Command -Arguments @("-c", "import nicegui"))) {
+    if (-not (Test-JobMatchDependencies)) {
         Write-Host "JobMatch dependencies not found. Running setup..."
         & $SetupScript
     }

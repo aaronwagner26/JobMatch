@@ -5,7 +5,7 @@ Local, personal-use job matching tool built with Python, SQLite, and NiceGUI.
 ## Run
 
 ```bash
-python -m pip install -e .
+python -m pip install -r requirements.txt
 python -m playwright install chromium
 python -m app.ui.main
 ```
@@ -37,7 +37,7 @@ To use a different port:
 powershell -ExecutionPolicy Bypass -File .\run_jobmatch.ps1 -Port 8282
 ```
 
-Because the project is installed with `-e`, code changes pulled from Git are used immediately. You only need to rerun setup when Python dependencies change, typically after edits to `pyproject.toml`.
+Because the app runs directly from the repo folder, code changes pulled from Git are used immediately. You only need to rerun setup when Python dependencies change, typically after edits to `requirements.txt` or `pyproject.toml`.
 
 ## CLI
 
