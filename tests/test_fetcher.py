@@ -369,6 +369,65 @@ def test_indeed_detail_enrichment_skips_browser_fallback_after_block() -> None:
     assert dynamic_attempts == 0
 
 
+def test_indeed_browser_profile_uses_browser_session_for_results_pages() -> None:
+    source = JobSourceConfig(
+        id=8,
+        name="Indeed Search",
+        source_type="indeed",
+        url="https://example.com/jobs",
+        max_pages=2,
+        request_delay_ms=0,
+        use_browser_profile=True,
+    )
+    fetcher = JobFetcher(JobNormalizer())
+    session_used = False
+    request_attempted = False
+
+    async def fake_browser_session(
+        scan_source,
+        *,
+        parser,
+        max_jobs,
+        known_jobs,
+        throttle,
+        progress_callback,
+        diagnostics,
+        cancel_requested=None,
+    ):
+        nonlocal session_used
+        session_used = True
+        diagnostics["pages_scanned"] = 1
+        return (
+            [
+                {
+                    "raw_id": "browser-1",
+                    "title": "Browser Profile Role",
+                    "company": "Example Co",
+                    "location": "Remote",
+                    "summary": "Python and AWS role",
+                    "url": "https://example.com/viewjob?jk=browser-1",
+                }
+            ],
+            None,
+            None,
+            False,
+        )
+
+    async def fake_request_text(scan_source, url, *, throttle, conditional=True, cancel_requested=None):  # noqa: ANN001
+        nonlocal request_attempted
+        request_attempted = True
+        return FakeResponse(_indeed_page(_job_payloads("http", 1)))
+
+    fetcher._fetch_search_page_via_browser_session = fake_browser_session  # type: ignore[method-assign]
+    fetcher._request_text = fake_request_text  # type: ignore[method-assign]
+
+    result = asyncio.run(fetcher.scan_source(source, max_jobs=20, known_jobs={}))
+
+    assert result.status == "ok"
+    assert session_used is True
+    assert request_attempted is False
+
+
 def test_engine_deduplicates_cross_source_jobs_by_canonical_url() -> None:
     newer_time = datetime.now(UTC)
     older_time = newer_time - timedelta(hours=1)

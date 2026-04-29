@@ -878,6 +878,10 @@ class JobMatchUI:
             row = self._touch_scan_row(event.get("source_id"), event.get("source_name"))
             row["note"] = f"Switching to browser rendering on page {event.get('page', '?')} after {event.get('reason', 'request block')}"
             self._append_activity(f"{row['source_name']}: {row['note']}.")
+        elif kind == "source_browser_session":
+            row = self._touch_scan_row(event.get("source_id"), event.get("source_name"))
+            row["note"] = "Using the persistent browser profile for this source scan"
+            self._append_activity(f"{row['source_name']}: {row['note']}.")
         elif kind == "source_browser_assist":
             row = self._touch_scan_row(event.get("source_id"), event.get("source_name"))
             row["note"] = (

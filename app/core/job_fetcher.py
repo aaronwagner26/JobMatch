@@ -327,12 +327,23 @@ class JobFetcher:
         diagnostics: dict[str, Any],
         cancel_requested: Callable[[], bool] | None = None,
     ) -> tuple[list[dict[str, Any]], str | None, str | None, bool]:
+        if self._should_use_browser_session(source, parser):
+            return await self._fetch_search_page_via_browser_session(
+                source,
+                parser=parser,
+                max_jobs=max_jobs,
+                known_jobs=known_jobs,
+                throttle=throttle,
+                progress_callback=progress_callback,
+                diagnostics=diagnostics,
+                cancel_requested=cancel_requested,
+            )
         url = sanitize_source_url(source.url, source.source_type)
         first_response: httpx.Response | None = None
         all_jobs: list[dict[str, Any]] = []
         seen_external_ids: set[str] = set()
         seen_page_urls: set[str] = {url}
-        remaining_detail_budget = DEFAULT_DETAIL_FETCH_LIMIT
+        remaining_detail_budget = self._detail_fetch_budget(source, parser)
         consecutive_known_pages = 0
         page_number = 0
         max_pages = max(1, source.max_pages)
@@ -504,6 +515,143 @@ class JobFetcher:
             first_response.headers.get("last-modified"),
             False,
         )
+
+    async def _fetch_search_page_via_browser_session(
+        self,
+        source: JobSourceConfig,
+        *,
+        parser: str,
+        max_jobs: int,
+        known_jobs: dict[str, dict[str, Any]],
+        throttle: SourceThrottle,
+        progress_callback: Callable[[dict[str, Any]], None] | None,
+        diagnostics: dict[str, Any],
+        cancel_requested: Callable[[], bool] | None = None,
+    ) -> tuple[list[dict[str, Any]], str | None, str | None, bool]:
+        try:
+            from playwright.async_api import async_playwright
+        except Exception as exc:
+            raise RuntimeError("Playwright is required for persistent browser-profile scans.") from exc
+
+        url = sanitize_source_url(source.url, source.source_type)
+        all_jobs: list[dict[str, Any]] = []
+        seen_external_ids: set[str] = set()
+        seen_page_urls: set[str] = {url}
+        remaining_detail_budget = self._detail_fetch_budget(source, parser)
+        consecutive_known_pages = 0
+        page_number = 0
+        max_pages = max(1, source.max_pages)
+
+        self._emit_progress(
+            progress_callback,
+            event="source_browser_session",
+            source_id=source.id,
+            source_name=source.name,
+        )
+
+        async with async_playwright() as playwright:
+            context, page = await self._open_browser_context(playwright, source)
+            try:
+                while url and page_number < max_pages and len(all_jobs) < max_jobs:
+                    self._raise_if_cancelled(cancel_requested)
+                    page_number += 1
+                    diagnostics["pages_scanned"] = page_number
+                    await throttle.wait()
+                    html = await self._navigate_and_capture_browser_html(
+                        page,
+                        source,
+                        url,
+                        progress_callback=progress_callback,
+                        cancel_requested=cancel_requested,
+                    )
+                    if not html:
+                        raise RuntimeError(f"{source.name} browser session could not recover {url}.")
+                    if self._looks_like_security_check(html):
+                        raise SourceBlockedError(
+                            self._security_check_message(source, parser, needs_browser_profile=False)
+                        )
+
+                    page_jobs, next_url = self._parse_html_jobs(html, url, parser=parser)
+                    prepared_jobs: list[dict[str, Any]] = []
+                    known_count = 0
+                    for payload in page_jobs:
+                        prepared = self._prepare_payload(source, payload, known_jobs)
+                        external_id = str(prepared["external_id"])
+                        if external_id in seen_external_ids:
+                            continue
+                        seen_external_ids.add(external_id)
+                        if prepared.get("_known_listing"):
+                            known_count += 1
+                        prepared_jobs.append(prepared)
+                        if len(all_jobs) + len(prepared_jobs) >= max_jobs:
+                            break
+
+                    if not prepared_jobs:
+                        break
+
+                    jobs_requiring_detail = [job for job in prepared_jobs if job.get("_requires_detail")]
+                    if remaining_detail_budget > 0 and jobs_requiring_detail:
+                        self._raise_if_cancelled(cancel_requested)
+                        detail_batch = jobs_requiring_detail[:remaining_detail_budget]
+                        diagnostics["detail_pages_fetched"] = int(diagnostics["detail_pages_fetched"]) + len(detail_batch)
+                        self._emit_progress(
+                            progress_callback,
+                            event="source_detail",
+                            source_id=source.id,
+                            source_name=source.name,
+                            detail_pages=len(detail_batch),
+                            page=page_number,
+                        )
+                        await self._enrich_detail_pages(
+                            detail_batch,
+                            source,
+                            throttle=throttle,
+                            cancel_requested=cancel_requested,
+                        )
+                        remaining_detail_budget = max(0, remaining_detail_budget - len(detail_batch))
+
+                    all_jobs.extend(prepared_jobs)
+                    new_or_changed_count = len(prepared_jobs) - known_count
+                    self._emit_progress(
+                        progress_callback,
+                        event="source_page",
+                        source_id=source.id,
+                        source_name=source.name,
+                        page=page_number,
+                        jobs_kept=len(prepared_jobs),
+                        known_jobs=known_count,
+                        new_or_changed_jobs=new_or_changed_count,
+                        total_jobs=len(all_jobs),
+                    )
+
+                    if self._is_mostly_known_page(prepared_jobs, known_count, new_or_changed_count):
+                        consecutive_known_pages += 1
+                    else:
+                        consecutive_known_pages = 0
+
+                    if (
+                        page_number >= DEFAULT_EARLY_STOP_MIN_PAGES
+                        and consecutive_known_pages >= DEFAULT_EARLY_STOP_CONSECUTIVE_PAGES
+                    ):
+                        diagnostics["stopped_early"] = True
+                        self._emit_progress(
+                            progress_callback,
+                            event="source_early_stop",
+                            source_id=source.id,
+                            source_name=source.name,
+                            page=page_number,
+                        )
+                        break
+
+                    if not next_url or next_url in seen_page_urls:
+                        break
+                    next_url = sanitize_source_url(next_url, source.source_type)
+                    seen_page_urls.add(next_url)
+                    url = next_url
+            finally:
+                await context.close()
+
+        return all_jobs[:max_jobs], None, None, False
 
     def _prepare_payload(
         self,
@@ -868,73 +1016,104 @@ class JobFetcher:
 
         try:
             async with async_playwright() as playwright:
-                if source.use_browser_profile:
-                    context = await playwright.chromium.launch_persistent_context(
-                        user_data_dir=str(self._browser_profile_dir(source)),
-                        headless=False,
-                        user_agent=DEFAULT_HEADERS["User-Agent"],
-                        locale="en-US",
-                        extra_http_headers={"Accept-Language": DEFAULT_HEADERS["Accept-Language"]},
-                        viewport={"width": 1440, "height": 1024},
-                        args=[
-                            "--disable-blink-features=AutomationControlled",
-                            "--disable-dev-shm-usage",
-                        ],
-                    )
-                    page = context.pages[0] if context.pages else await context.new_page()
-                    with contextlib.suppress(Exception):
-                        await page.bring_to_front()
-                else:
-                    browser = await playwright.chromium.launch(
-                        headless=True,
-                        args=[
-                            "--disable-blink-features=AutomationControlled",
-                            "--disable-dev-shm-usage",
-                        ],
-                    )
-                    context = await browser.new_context(
-                        user_agent=DEFAULT_HEADERS["User-Agent"],
-                        locale="en-US",
-                        extra_http_headers={"Accept-Language": DEFAULT_HEADERS["Accept-Language"]},
-                        viewport={"width": 1440, "height": 1024},
-                    )
-                    page = await context.new_page()
-                await page.add_init_script(
-                    """
-                    Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-                    window.chrome = window.chrome || { runtime: {} };
-                    """
-                )
+                context, page = await self._open_browser_context(playwright, source)
                 try:
-                    await page.goto(url, wait_until="domcontentloaded", timeout=int(DEFAULT_HTTP_TIMEOUT * 1000))
-                except PlaywrightTimeoutError:
-                    logger.warning("Playwright goto timed out for %s; capturing whatever loaded.", url)
-                selectors = [
-                    "[data-jk]",
-                    "[data-testid='slider_item']",
-                    ".jobsearch-ResultsList",
-                    "main",
-                    "article",
-                ]
-                for selector in selectors:
-                    with contextlib.suppress(Exception):
-                        await page.wait_for_selector(selector, timeout=2500)
-                        break
-                await page.wait_for_timeout(1200)
-                if source.use_browser_profile:
-                    html = await self._wait_for_manual_browser_clearance(
-                        source,
+                    return await self._navigate_and_capture_browser_html(
                         page,
-                        progress_callback,
+                        source,
+                        url,
+                        progress_callback=progress_callback,
                         cancel_requested=cancel_requested,
                     )
-                else:
-                    html = await page.content()
-                await context.close()
-                return html
+                finally:
+                    await context.close()
         except Exception as exc:
             logger.warning("Playwright fetch failed for %s: %s", url, exc)
             return None
+
+    async def _open_browser_context(self, playwright, source: JobSourceConfig):
+        if source.use_browser_profile:
+            context = await playwright.chromium.launch_persistent_context(
+                user_data_dir=str(self._browser_profile_dir(source)),
+                headless=False,
+                user_agent=DEFAULT_HEADERS["User-Agent"],
+                locale="en-US",
+                extra_http_headers={"Accept-Language": DEFAULT_HEADERS["Accept-Language"]},
+                viewport={"width": 1440, "height": 1024},
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-dev-shm-usage",
+                ],
+            )
+            page = context.pages[0] if context.pages else await context.new_page()
+            with contextlib.suppress(Exception):
+                await page.bring_to_front()
+            await page.add_init_script(
+                """
+                Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                window.chrome = window.chrome || { runtime: {} };
+                """
+            )
+            return context, page
+
+        browser = await playwright.chromium.launch(
+            headless=True,
+            args=[
+                "--disable-blink-features=AutomationControlled",
+                "--disable-dev-shm-usage",
+            ],
+        )
+        context = await browser.new_context(
+            user_agent=DEFAULT_HEADERS["User-Agent"],
+            locale="en-US",
+            extra_http_headers={"Accept-Language": DEFAULT_HEADERS["Accept-Language"]},
+            viewport={"width": 1440, "height": 1024},
+        )
+        page = await context.new_page()
+        await page.add_init_script(
+            """
+            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+            window.chrome = window.chrome || { runtime: {} };
+            """
+        )
+        return context, page
+
+    async def _navigate_and_capture_browser_html(
+        self,
+        page,
+        source: JobSourceConfig,
+        url: str,
+        *,
+        progress_callback: Callable[[dict[str, Any]], None] | None = None,
+        cancel_requested: Callable[[], bool] | None = None,
+    ) -> str:
+        from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+
+        self._raise_if_cancelled(cancel_requested)
+        try:
+            await page.goto(url, wait_until="domcontentloaded", timeout=int(DEFAULT_HTTP_TIMEOUT * 1000))
+        except PlaywrightTimeoutError:
+            logger.warning("Playwright goto timed out for %s; capturing whatever loaded.", url)
+        selectors = [
+            "[data-jk]",
+            "[data-testid='slider_item']",
+            ".jobsearch-ResultsList",
+            "main",
+            "article",
+        ]
+        for selector in selectors:
+            with contextlib.suppress(Exception):
+                await page.wait_for_selector(selector, timeout=2500)
+                break
+        await page.wait_for_timeout(1200)
+        if source.use_browser_profile:
+            return await self._wait_for_manual_browser_clearance(
+                source,
+                page,
+                progress_callback,
+                cancel_requested=cancel_requested,
+            )
+        return await page.content()
 
     async def _wait_for_manual_browser_clearance(
         self,
@@ -971,6 +1150,16 @@ class JobFetcher:
     def _browser_profile_dir(source: JobSourceConfig) -> Path:
         token = source.id if source.id is not None else safe_filename(source.name)
         return BROWSER_PROFILES_DIR / f"source-{token}"
+
+    @staticmethod
+    def _should_use_browser_session(source: JobSourceConfig, parser: str) -> bool:
+        return source.use_browser_profile and parser in {"indeed", "clearance", "generic"}
+
+    @staticmethod
+    def _detail_fetch_budget(source: JobSourceConfig, parser: str) -> int:
+        if source.use_browser_profile and parser == "indeed":
+            return 0
+        return DEFAULT_DETAIL_FETCH_LIMIT
 
     @staticmethod
     def _should_try_dynamic_fallback(parser: str, status_code: int | None) -> bool:
