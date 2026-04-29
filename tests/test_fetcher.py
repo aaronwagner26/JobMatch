@@ -1,6 +1,8 @@
 import asyncio
 from datetime import UTC, datetime, timedelta
 
+import httpx
+
 from app.core.engine import JobMatchEngine
 from app.core.job_fetcher import JobFetcher, SourceThrottle
 from app.core.normalizer import JobNormalizer
@@ -198,6 +200,50 @@ def test_scan_source_emits_progress_and_records_metrics() -> None:
     assert result.detail_pages_fetched == 2
     assert any(event["event"] == "source_page" for event in progress_events)
     assert any(event["event"] == "source_detail" for event in progress_events)
+
+
+def test_scan_source_falls_back_to_playwright_after_403() -> None:
+    source = JobSourceConfig(
+        id=4,
+        name="Indeed Search",
+        source_type="indeed",
+        url="https://example.com/jobs",
+        max_pages=1,
+        request_delay_ms=0,
+    )
+    fetcher = JobFetcher(JobNormalizer())
+    progress_events: list[dict] = []
+
+    async def fake_request_text(scan_source, url, *, throttle, conditional=True):  # noqa: ANN001
+        request = httpx.Request("GET", url)
+        response = httpx.Response(403, request=request)
+        raise httpx.HTTPStatusError("Forbidden", request=request, response=response)
+
+    async def fake_dynamic_html(url: str) -> str | None:
+        return _indeed_page(_job_payloads("dynamic", 2))
+
+    async def fake_enrich(jobs, scan_source, *, throttle):  # noqa: ANN001
+        for job in jobs:
+            job["description"] = f"Detailed {job['title']}"
+
+    fetcher._request_text = fake_request_text  # type: ignore[method-assign]
+    fetcher._fetch_dynamic_html = fake_dynamic_html  # type: ignore[assignment]
+    fetcher._enrich_detail_pages = fake_enrich  # type: ignore[method-assign]
+
+    jobs, _, _, _ = asyncio.run(
+        fetcher._fetch_search_page(
+            source,
+            parser="indeed",
+            max_jobs=20,
+            known_jobs={},
+            throttle=SourceThrottle(0),
+            progress_callback=lambda event: progress_events.append(event),
+            diagnostics={"pages_scanned": 0, "detail_pages_fetched": 0, "stopped_early": False},
+        )
+    )
+
+    assert len(jobs) == 2
+    assert any(event["event"] == "source_fallback" for event in progress_events)
 
 
 def test_engine_deduplicates_cross_source_jobs_by_canonical_url() -> None:

@@ -773,6 +773,10 @@ class JobMatchUI:
             row["detail_pages_fetched"] += int(event.get("detail_pages") or 0)
             row["note"] = f"Fetching {event.get('detail_pages', 0)} detail page(s) from page {event.get('page', '?')}"
             self._append_activity(f"{row['source_name']}: {row['note']}.")
+        elif kind == "source_fallback":
+            row = self._touch_scan_row(event.get("source_id"), event.get("source_name"))
+            row["note"] = f"Switching to browser rendering on page {event.get('page', '?')} after {event.get('reason', 'request block')}"
+            self._append_activity(f"{row['source_name']}: {row['note']}.")
         elif kind == "source_early_stop":
             row = self._touch_scan_row(event.get("source_id"), event.get("source_name"))
             row["stopped_early"] = True

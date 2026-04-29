@@ -28,7 +28,7 @@ from app.utils.text import absolute_url, normalize_whitespace, strip_html
 logger = logging.getLogger(__name__)
 
 JSON_LD_JOB_POSTING = "jobposting"
-RETRYABLE_STATUS_CODES = {403, 408, 429, 500, 502, 503, 504}
+RETRYABLE_STATUS_CODES = {408, 429, 500, 502, 503, 504}
 
 
 class SourceThrottle:
@@ -246,15 +246,44 @@ class JobFetcher:
         while url and page_number < max_pages and len(all_jobs) < max_jobs:
             page_number += 1
             diagnostics["pages_scanned"] = page_number
-            response = await self._request_text(source, url, throttle=throttle)
-            if page_number == 1 and response.status_code == 304:
-                return [], response.headers.get("etag"), response.headers.get("last-modified"), True
-            first_response = first_response or response
+            page_jobs: list[dict[str, Any]] = []
+            next_url: str | None = None
+            used_dynamic_fallback = False
+            try:
+                response = await self._request_text(source, url, throttle=throttle)
+                if page_number == 1 and response.status_code == 304:
+                    return [], response.headers.get("etag"), response.headers.get("last-modified"), True
+                first_response = first_response or response
 
-            page_html = response.text
-            page_jobs, next_url = self._parse_html_jobs(page_html, url, parser=parser)
+                page_html = response.text
+                page_jobs, next_url = self._parse_html_jobs(page_html, url, parser=parser)
+            except httpx.HTTPStatusError as exc:
+                status_code = exc.response.status_code if exc.response is not None else None
+                if not self._should_try_dynamic_fallback(parser, status_code):
+                    raise
+                used_dynamic_fallback = True
+                reason = f"HTTP {status_code}" if status_code is not None else "request failure"
+                logger.info("Falling back to Playwright for %s page %s after %s", source.name, page_number, reason)
+                self._emit_progress(
+                    progress_callback,
+                    event="source_fallback",
+                    source_id=source.id,
+                    source_name=source.name,
+                    page=page_number,
+                    reason=reason,
+                )
+                dynamic_html = await self._fetch_dynamic_html(url)
+                if not dynamic_html:
+                    raise RuntimeError(
+                        f"{source.name} was blocked by {reason}, and browser fallback could not recover the page."
+                    ) from exc
+                page_jobs, next_url = self._parse_html_jobs(dynamic_html, url, parser=parser)
+                if not page_jobs:
+                    raise RuntimeError(
+                        f"{source.name} was blocked by {reason}. Browser fallback loaded the page, but no jobs were detected."
+                    ) from exc
 
-            if (source.use_playwright or not page_jobs) and parser in {"indeed", "clearance", "generic"}:
+            if (source.use_playwright or not page_jobs) and not used_dynamic_fallback and parser in {"indeed", "clearance", "generic"}:
                 dynamic_html = await self._fetch_dynamic_html(source.url if page_number == 1 else url)
                 if dynamic_html:
                     dynamic_jobs, dynamic_next_url = self._parse_html_jobs(dynamic_html, url, parser=parser)
@@ -339,7 +368,7 @@ class JobFetcher:
             url = next_url
 
         if first_response is None:
-            return [], None, None, False
+            return all_jobs[:max_jobs], None, None, False
         return (
             all_jobs[:max_jobs],
             first_response.headers.get("etag"),
@@ -564,9 +593,22 @@ class JobFetcher:
             async with semaphore:
                 try:
                     response = await self._request_text(source, job["url"], throttle=throttle, conditional=False)
+                    soup = BeautifulSoup(response.text, "html.parser")
+                except httpx.HTTPStatusError as exc:
+                    status_code = exc.response.status_code if exc.response is not None else None
+                    if status_code not in {403, 429}:
+                        return
+                    logger.info(
+                        "Falling back to Playwright for detail page %s after HTTP %s",
+                        job["url"],
+                        status_code,
+                    )
+                    dynamic_html = await self._fetch_dynamic_html(job["url"])
+                    if not dynamic_html:
+                        return
+                    soup = BeautifulSoup(dynamic_html, "html.parser")
                 except Exception:
                     return
-                soup = BeautifulSoup(response.text, "html.parser")
                 primary = soup.select_one(".jobDescriptionText, article, main, [role='main'], .posting, .job-description")
                 if primary:
                     job["description"] = normalize_whitespace(primary.get_text(" "))
@@ -656,7 +698,12 @@ class JobFetcher:
         try:
             async with async_playwright() as playwright:
                 browser = await playwright.chromium.launch(headless=True)
-                page = await browser.new_page()
+                page = await browser.new_page(
+                    user_agent=DEFAULT_HEADERS["User-Agent"],
+                    locale="en-US",
+                    extra_http_headers={"Accept-Language": DEFAULT_HEADERS["Accept-Language"]},
+                    viewport={"width": 1440, "height": 1024},
+                )
                 await page.goto(url, wait_until="networkidle", timeout=int(DEFAULT_HTTP_TIMEOUT * 1000))
                 html = await page.content()
                 await browser.close()
@@ -664,6 +711,10 @@ class JobFetcher:
         except Exception as exc:
             logger.warning("Playwright fetch failed for %s: %s", url, exc)
             return None
+
+    @staticmethod
+    def _should_try_dynamic_fallback(parser: str, status_code: int | None) -> bool:
+        return parser in {"indeed", "clearance", "generic"} and status_code in {403, 429}
 
     @staticmethod
     def _determine_source_type(source: JobSourceConfig) -> str:
