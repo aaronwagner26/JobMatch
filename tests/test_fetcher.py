@@ -428,6 +428,47 @@ def test_indeed_browser_profile_uses_browser_session_for_results_pages() -> None
     assert request_attempted is False
 
 
+def test_wait_for_manual_browser_clearance_retries_during_navigation() -> None:
+    fetcher = JobFetcher(JobNormalizer())
+    source = JobSourceConfig(
+        id=9,
+        name="Indeed Search",
+        source_type="indeed",
+        url="https://example.com/jobs",
+        request_delay_ms=0,
+    )
+    progress_events: list[dict] = []
+
+    class FakePage:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def content(self) -> str:
+            self.calls += 1
+            if self.calls == 1:
+                raise RuntimeError("Page.content: Unable to retrieve content because the page is navigating and changing the content.")
+            if self.calls == 2:
+                return "<html><body>Additional Verification Required</body></html>"
+            return "<html><body><main>Jobs loaded</main></body></html>"
+
+        async def wait_for_load_state(self, state, timeout):  # noqa: ANN001
+            return None
+
+        async def wait_for_timeout(self, timeout):  # noqa: ANN001
+            return None
+
+    html = asyncio.run(
+        fetcher._wait_for_manual_browser_clearance(
+            source,
+            FakePage(),
+            lambda event: progress_events.append(event),
+        )
+    )
+
+    assert "Jobs loaded" in html
+    assert any(event["event"] == "source_browser_assist" for event in progress_events)
+
+
 def test_engine_deduplicates_cross_source_jobs_by_canonical_url() -> None:
     newer_time = datetime.now(UTC)
     older_time = newer_time - timedelta(hours=1)

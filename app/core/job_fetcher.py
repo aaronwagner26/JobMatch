@@ -1113,7 +1113,7 @@ class JobFetcher:
                 progress_callback,
                 cancel_requested=cancel_requested,
             )
-        return await page.content()
+        return await self._capture_page_content(page, cancel_requested=cancel_requested)
 
     async def _wait_for_manual_browser_clearance(
         self,
@@ -1122,7 +1122,7 @@ class JobFetcher:
         progress_callback: Callable[[dict[str, Any]], None] | None,
         cancel_requested: Callable[[], bool] | None = None,
     ) -> str:
-        html = await page.content()
+        html = await self._capture_page_content(page, cancel_requested=cancel_requested)
         if not self._looks_like_security_check(html):
             return html
         self._emit_progress(
@@ -1136,10 +1136,44 @@ class JobFetcher:
         while time.monotonic() < deadline:
             self._raise_if_cancelled(cancel_requested)
             await page.wait_for_timeout(2000)
-            html = await page.content()
+            html = await self._capture_page_content(page, cancel_requested=cancel_requested)
             if not self._looks_like_security_check(html):
                 return html
         return html
+
+    async def _capture_page_content(
+        self,
+        page,
+        *,
+        cancel_requested: Callable[[], bool] | None = None,
+        attempts: int = 8,
+        wait_ms: int = 500,
+    ) -> str:
+        last_error: Exception | None = None
+        for _ in range(max(attempts, 1)):
+            self._raise_if_cancelled(cancel_requested)
+            try:
+                return await page.content()
+            except Exception as exc:
+                message = str(exc).casefold()
+                if not any(
+                    token in message
+                    for token in (
+                        "page is navigating",
+                        "changing the content",
+                        "execution context was destroyed",
+                        "navigation",
+                    )
+                ):
+                    raise
+                last_error = exc
+                with contextlib.suppress(Exception):
+                    await page.wait_for_load_state("domcontentloaded", timeout=2000)
+                with contextlib.suppress(Exception):
+                    await page.wait_for_timeout(wait_ms)
+        if last_error is not None:
+            raise last_error
+        return await page.content()
 
     @staticmethod
     def _raise_if_cancelled(cancel_requested: Callable[[], bool] | None) -> None:
