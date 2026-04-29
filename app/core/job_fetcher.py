@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
 import time
 import re
 from collections.abc import Callable
@@ -1033,6 +1034,9 @@ class JobFetcher:
 
     async def _open_browser_context(self, playwright, source: JobSourceConfig):
         if source.use_browser_profile:
+            launch_options, browser_label = self._persistent_browser_launch_options()
+            if browser_label:
+                logger.info("Launching persistent browser profile for %s with %s", source.name, browser_label)
             context = await playwright.chromium.launch_persistent_context(
                 user_data_dir=str(self._browser_profile_dir(source)),
                 headless=False,
@@ -1044,6 +1048,7 @@ class JobFetcher:
                     "--disable-blink-features=AutomationControlled",
                     "--disable-dev-shm-usage",
                 ],
+                **launch_options,
             )
             page = context.pages[0] if context.pages else await context.new_page()
             with contextlib.suppress(Exception):
@@ -1184,6 +1189,27 @@ class JobFetcher:
     def _browser_profile_dir(source: JobSourceConfig) -> Path:
         token = source.id if source.id is not None else safe_filename(source.name)
         return BROWSER_PROFILES_DIR / f"source-{token}"
+
+    @staticmethod
+    def _persistent_browser_launch_options() -> tuple[dict[str, str], str | None]:
+        override = os.getenv("JOBMATCH_BROWSER_EXECUTABLE")
+        if override:
+            expanded = Path(os.path.expandvars(override)).expanduser()
+            if expanded.exists():
+                return {"executable_path": str(expanded)}, expanded.stem
+
+        candidates = [
+            ("Chrome", Path(r"C:\Program Files\Google\Chrome\Application\chrome.exe")),
+            ("Chrome", Path(r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe")),
+            ("Chrome", Path(os.path.expandvars(r"%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"))),
+            ("Edge", Path(r"C:\Program Files\Microsoft\Edge\Application\msedge.exe")),
+            ("Edge", Path(r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe")),
+            ("Edge", Path(os.path.expandvars(r"%LOCALAPPDATA%\Microsoft\Edge\Application\msedge.exe"))),
+        ]
+        for label, executable in candidates:
+            if executable.exists():
+                return {"executable_path": str(executable)}, label
+        return {}, None
 
     @staticmethod
     def _should_use_browser_session(source: JobSourceConfig, parser: str) -> bool:

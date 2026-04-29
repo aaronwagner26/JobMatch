@@ -1,4 +1,5 @@
 import asyncio
+import os
 from datetime import UTC, datetime, timedelta
 
 import httpx
@@ -467,6 +468,23 @@ def test_wait_for_manual_browser_clearance_retries_during_navigation() -> None:
 
     assert "Jobs loaded" in html
     assert any(event["event"] == "source_browser_assist" for event in progress_events)
+
+
+def test_persistent_browser_launch_options_use_override(tmp_path) -> None:
+    fake_browser = tmp_path / "chrome.exe"
+    fake_browser.write_text("", encoding="utf-8")
+    original = os.environ.get("JOBMATCH_BROWSER_EXECUTABLE")
+    os.environ["JOBMATCH_BROWSER_EXECUTABLE"] = str(fake_browser)
+    try:
+        options, label = JobFetcher._persistent_browser_launch_options()
+    finally:
+        if original is None:
+            os.environ.pop("JOBMATCH_BROWSER_EXECUTABLE", None)
+        else:
+            os.environ["JOBMATCH_BROWSER_EXECUTABLE"] = original
+
+    assert options["executable_path"] == str(fake_browser)
+    assert label == "chrome"
 
 
 def test_engine_deduplicates_cross_source_jobs_by_canonical_url() -> None:
