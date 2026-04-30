@@ -192,11 +192,8 @@ async function captureIndeedPage(options = {}) {
   }
   const queryLabel = firstText(document, ['h1', '[data-testid="jobsearch-HeroLabel"]']) || document.title;
   const payload = buildCapturePayload('indeed_search', 'Indeed', queryLabel, jobs);
-  return appendPaginatedJobs(payload, {
-    maxPages: options.maxPages,
-    nextPageUrl: getIndeedNextPageUrl(document, location.href),
-    parsePage: parseIndeedResultsDocument,
-  });
+  payload.page.next_page_url = getIndeedNextPageUrl(document, location.href);
+  return payload;
 }
 
 async function captureClearanceJobsPage(options = {}) {
@@ -245,11 +242,8 @@ async function captureClearanceJobsPage(options = {}) {
   }
   const label = firstText(document, ['h1', '.job-search-title']) || document.title;
   const payload = buildCapturePayload('clearance_search', 'ClearanceJobs', label, jobs);
-  return appendPaginatedJobs(payload, {
-    maxPages: options.maxPages,
-    nextPageUrl: getClearanceJobsNextPageUrl(document, location.href),
-    parsePage: parseClearanceJobsResultsDocument,
-  });
+  payload.page.next_page_url = getClearanceJobsNextPageUrl(document, location.href);
+  return payload;
 }
 
 function captureClearanceJobsDetailPage() {
@@ -414,6 +408,8 @@ function buildCapturePayload(parser, site, companyOrLabel, jobs) {
       site,
       parser,
       captured_at: new Date().toISOString(),
+      captured_page_count: 1,
+      next_page_url: '',
     },
     source: {
       url: location.href,
@@ -555,6 +551,7 @@ function parseClearanceJobsResultsDocument(doc, pageUrl) {
 }
 
 function getIndeedNextPageUrl(root, pageUrl) {
+  const currentStart = parseNumericQueryParam(pageUrl, 'start', 0);
   const anchor = firstNode(root, [
     'a[data-testid="pagination-page-next"]',
     'a[aria-label^="Next"]',
@@ -564,7 +561,6 @@ function getIndeedNextPageUrl(root, pageUrl) {
   if (anchor) {
     return absoluteUrlFor(anchor.getAttribute('href') || anchor.href || '', pageUrl);
   }
-  const currentStart = parseNumericQueryParam(pageUrl, 'start', 0);
   const candidate = findNextPaginationHref(root, pageUrl, (url) => {
     const start = parseNumericQueryParam(url, 'start', -1);
     return start > currentStart;
@@ -572,10 +568,70 @@ function getIndeedNextPageUrl(root, pageUrl) {
   if (candidate) {
     return candidate;
   }
-  return '';
+  const hasPagination = Boolean(firstNode(root, [
+    'nav[aria-label="pagination"]',
+    '[data-testid="pagination-page-next"]',
+    '[data-testid^="pagination-page-"]',
+  ]));
+  if (!hasPagination) {
+    return '';
+  }
+  try {
+    const url = new URL(pageUrl, location.href);
+    url.searchParams.set('start', String(Math.max(currentStart, 0) + 10));
+    url.searchParams.delete('vjk');
+    return url.toString();
+  } catch (_error) {
+    return '';
+  }
+}
+
+function getClearanceJobsCurrentPage(root, pageUrl) {
+  const selectedPage = Number.parseInt(text(firstNode(root, [
+    '.cj-pagination .btn--selected',
+    '.cj-pagination button.btn--selected',
+  ])), 10);
+  if (Number.isFinite(selectedPage) && selectedPage > 0) {
+    return selectedPage;
+  }
+  const explicitPage = parseNumericQueryParam(pageUrl, 'PAGE', NaN);
+  if (Number.isFinite(explicitPage) && explicitPage > 0) {
+    return explicitPage;
+  }
+  const fallbackPage = parseNumericQueryParam(pageUrl, 'page', 1);
+  return Number.isFinite(fallbackPage) && fallbackPage > 0 ? fallbackPage : 1;
+}
+
+function nextClearanceJobsButtonPage(root, currentPage) {
+  const pageNumbers = Array.from(root.querySelectorAll('.cj-pagination .btn'))
+    .map((node) => Number.parseInt(text(node), 10))
+    .filter((value) => Number.isFinite(value) && value > currentPage)
+    .sort((left, right) => left - right);
+  return pageNumbers[0] || currentPage + 1;
+}
+
+function setCaseInsensitiveQueryParam(pageUrl, key, value, preferredKey = key) {
+  try {
+    const url = new URL(pageUrl, location.href);
+    let matchedKey = '';
+    for (const [entryKey] of url.searchParams.entries()) {
+      if (entryKey.toLowerCase() === key.toLowerCase()) {
+        matchedKey = entryKey;
+        break;
+      }
+    }
+    if (matchedKey && matchedKey !== preferredKey) {
+      url.searchParams.delete(matchedKey);
+    }
+    url.searchParams.set(matchedKey || preferredKey, value);
+    return url.toString();
+  } catch (_error) {
+    return '';
+  }
 }
 
 function getClearanceJobsNextPageUrl(root, pageUrl) {
+  const currentPage = getClearanceJobsCurrentPage(root, pageUrl);
   const anchor = firstNode(root, [
     'a[rel="next"]',
     'a[aria-label^="Next"]',
@@ -585,21 +641,25 @@ function getClearanceJobsNextPageUrl(root, pageUrl) {
   if (anchor) {
     return absoluteUrlFor(anchor.getAttribute('href') || anchor.href || '', pageUrl);
   }
-  const currentPage = parseNumericQueryParam(pageUrl, 'page', 1);
+  const nextButton = firstNode(root, [
+    '.cj-pagination .btn--next:not([disabled]):not([aria-disabled="true"])',
+    '.cj-pagination button.btn--next:not([disabled]):not([aria-disabled="true"])',
+  ]);
+  if (nextButton) {
+    return setCaseInsensitiveQueryParam(pageUrl, 'PAGE', String(nextClearanceJobsButtonPage(root, currentPage)), 'PAGE');
+  }
   const candidate = findNextPaginationHref(root, pageUrl, (url) => {
-    const page = parseNumericQueryParam(url, 'page', -1);
+    const page = parseNumericQueryParam(url, 'PAGE', -1);
     return page > currentPage;
   });
   if (candidate) {
     return candidate;
   }
-  try {
-    const url = new URL(pageUrl, location.href);
-    url.searchParams.set('page', String(Math.max(currentPage, 1) + 1));
-    return url.toString();
-  } catch (_error) {
+  const hasPagination = Boolean(firstNode(root, ['.cj-pagination', '.btn--next', '.btn--selected']));
+  if (!hasPagination) {
     return '';
   }
+  return setCaseInsensitiveQueryParam(pageUrl, 'PAGE', String(Math.max(currentPage, 1) + 1), 'PAGE');
 }
 
 function normalizeCapturePageCount(value) {
@@ -628,7 +688,15 @@ function findNextPaginationHref(root, pageUrl, predicate) {
 function parseNumericQueryParam(url, key, fallbackValue) {
   try {
     const parsed = new URL(url, location.href);
-    const rawValue = parsed.searchParams.get(key);
+    let rawValue = parsed.searchParams.get(key);
+    if (rawValue === null) {
+      for (const [entryKey, entryValue] of parsed.searchParams.entries()) {
+        if (entryKey.toLowerCase() === String(key || '').toLowerCase()) {
+          rawValue = entryValue;
+          break;
+        }
+      }
+    }
     const numeric = Number.parseInt(String(rawValue || ''), 10);
     return Number.isFinite(numeric) ? numeric : fallbackValue;
   } catch (_error) {

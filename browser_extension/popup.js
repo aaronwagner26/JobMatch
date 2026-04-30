@@ -119,7 +119,7 @@ async function testConnection() {
 async function captureVisibleJobs() {
   setBusy(true);
   try {
-    setStatus('Capturing visible jobs from the current page.\nWalking visible result details and following supported next pages when available...');
+    setStatus('Capturing visible jobs from the current page.\nWalking visible result details and advancing through supported next pages...');
     const config = await saveConfig();
     if (!config.serverUrl) {
       throw new Error('Enter the JobMatch server URL first.');
@@ -136,23 +136,48 @@ async function captureVisibleJobs() {
     if (!tab?.id) {
       throw new Error('Could not find the active tab.');
     }
-    const capture = await chrome.tabs.sendMessage(tab.id, {
-      type: 'jobmatch_capture_page',
-      maxPages: config.pageCount,
-    });
-    if (!capture?.ok) {
-      throw new Error(capture?.error || 'Could not read jobs from the current page.');
+    let combinedPayload = null;
+    let pagesCaptured = 0;
+    const visitedPageUrls = new Set();
+
+    while (pagesCaptured < config.pageCount) {
+      setStatus(`Capturing page ${pagesCaptured + 1} of up to ${config.pageCount}...`);
+      const capture = await requestPageCapture(tab.id);
+      if (!capture?.ok) {
+        throw new Error(capture?.error || 'Could not read jobs from the current page.');
+      }
+      if (!Array.isArray(capture.payload?.jobs) || capture.payload.jobs.length === 0) {
+        if (pagesCaptured === 0) {
+          throw new Error('No jobs were detected on the current page.');
+        }
+        break;
+      }
+      combinedPayload = mergeCapturePayload(combinedPayload, capture.payload);
+      pagesCaptured += 1;
+
+      const nextPageUrl = normalizePageUrl(capture.payload?.page?.next_page_url || '');
+      if (!nextPageUrl || visitedPageUrls.has(nextPageUrl) || pagesCaptured >= config.pageCount) {
+        break;
+      }
+      visitedPageUrls.add(nextPageUrl);
+      setStatus(`Captured page ${pagesCaptured}.\nLoading page ${pagesCaptured + 1}...`);
+      await navigateTabAndWait(tab.id, nextPageUrl);
     }
-    if (!Array.isArray(capture.payload?.jobs) || capture.payload.jobs.length === 0) {
+
+    if (!combinedPayload || !Array.isArray(combinedPayload.jobs) || combinedPayload.jobs.length === 0) {
       throw new Error('No jobs were detected on the current page.');
     }
+    combinedPayload.page = {
+      ...(combinedPayload.page || {}),
+      captured_page_count: pagesCaptured,
+    };
     const response = await fetch(`${config.serverUrl}/api/browser-capture`, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${token}`,
         'Content-Type': 'application/json',
       },
-      body: JSON.stringify(capture.payload),
+      body: JSON.stringify(combinedPayload),
     });
     const payload = await response.json();
     if (!response.ok) {
@@ -161,7 +186,7 @@ async function captureVisibleJobs() {
     setStatus(
       [
         `Imported into ${payload.source_name}.`,
-        `${capture.payload?.page?.captured_page_count || 1} page(s) captured`,
+        `${pagesCaptured} page(s) captured`,
         `${payload.jobs_imported} job(s) parsed`,
         `${payload.jobs_created} new, ${payload.jobs_updated} updated, ${payload.jobs_unchanged} unchanged`,
       ].join('\n')
@@ -170,6 +195,133 @@ async function captureVisibleJobs() {
     setStatus(`Capture failed.\n${errorMessage(error)}`);
   } finally {
     setBusy(false);
+  }
+}
+
+async function requestPageCapture(tabId) {
+  let lastError = null;
+  for (let attempt = 0; attempt < 6; attempt += 1) {
+    try {
+      const response = await chrome.tabs.sendMessage(tabId, {
+        type: 'jobmatch_capture_page',
+        maxPages: 1,
+      });
+      if (response) {
+        return response;
+      }
+    } catch (error) {
+      lastError = error;
+    }
+    await delay(300);
+  }
+  throw lastError || new Error('Could not talk to the page capture script.');
+}
+
+async function navigateTabAndWait(tabId, nextPageUrl) {
+  await chrome.tabs.update(tabId, { url: nextPageUrl });
+  await waitForTabComplete(tabId);
+  await delay(450);
+}
+
+function waitForTabComplete(tabId) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timeoutId = window.setTimeout(() => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      chrome.tabs.onUpdated.removeListener(handleUpdated);
+      reject(new Error('Timed out waiting for the next page to finish loading.'));
+    }, 30000);
+
+    const handleUpdated = (updatedTabId, changeInfo) => {
+      if (settled || updatedTabId !== tabId || changeInfo.status !== 'complete') {
+        return;
+      }
+      settled = true;
+      window.clearTimeout(timeoutId);
+      chrome.tabs.onUpdated.removeListener(handleUpdated);
+      resolve();
+    };
+
+    chrome.tabs.onUpdated.addListener(handleUpdated);
+    void chrome.tabs.get(tabId).then((tab) => {
+      if (settled || tab?.status !== 'complete') {
+        return;
+      }
+      settled = true;
+      window.clearTimeout(timeoutId);
+      chrome.tabs.onUpdated.removeListener(handleUpdated);
+      resolve();
+    }).catch(() => {
+      // Ignore transient tab lookup failures and continue waiting on updates.
+    });
+  });
+}
+
+function mergeCapturePayload(basePayload, nextPayload) {
+  if (!basePayload) {
+    return {
+      ...nextPayload,
+      page: { ...(nextPayload.page || {}) },
+      source: { ...(nextPayload.source || {}) },
+      jobs: Array.isArray(nextPayload.jobs) ? [...nextPayload.jobs] : [],
+    };
+  }
+
+  const mergedJobs = uniqueCapturedJobs([
+    ...(Array.isArray(basePayload.jobs) ? basePayload.jobs : []),
+    ...(Array.isArray(nextPayload.jobs) ? nextPayload.jobs : []),
+  ]);
+
+  return {
+    ...basePayload,
+    page: {
+      ...(basePayload.page || {}),
+      ...(nextPayload.page || {}),
+      next_page_url: nextPayload.page?.next_page_url || '',
+    },
+    jobs: mergedJobs,
+  };
+}
+
+function uniqueCapturedJobs(jobs) {
+  const seen = new Set();
+  const output = [];
+  for (const job of jobs) {
+    if (!job || typeof job !== 'object') {
+      continue;
+    }
+    const key = normalizeCaptureJobKey(job);
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    output.push(job);
+  }
+  return output;
+}
+
+function normalizeCaptureJobKey(job) {
+  return [
+    String(job.raw_id || '').trim().toLowerCase(),
+    String(job.url || '').trim().toLowerCase(),
+    String(job.title || '').trim().toLowerCase(),
+    String(job.company || '').trim().toLowerCase(),
+    String(job.location || '').trim().toLowerCase(),
+  ].filter(Boolean).join('|');
+}
+
+function normalizePageUrl(value) {
+  const trimmed = String(value || '').trim();
+  if (!trimmed) {
+    return '';
+  }
+  try {
+    return new URL(trimmed).toString();
+  } catch (_error) {
+    return trimmed;
   }
 }
 
@@ -291,6 +443,10 @@ function normalizePageCount(value) {
 
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error);
+}
+
+function delay(ms) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
 }
 
 function setBusy(isBusy) {
