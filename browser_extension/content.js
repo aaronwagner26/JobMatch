@@ -44,6 +44,9 @@ async function captureCurrentPage() {
   if (host.includes('indeed.')) {
     return captureIndeedPage();
   }
+  if (host.includes('clearancejobs.com')) {
+    return captureClearanceJobsPage();
+  }
   return captureGenericPage();
 }
 
@@ -188,6 +191,102 @@ async function captureIndeedPage() {
   }
   const queryLabel = firstText(document, ['h1', '[data-testid="jobsearch-HeroLabel"]']) || document.title;
   return buildCapturePayload('indeed_search', 'Indeed', queryLabel, jobs);
+}
+
+async function captureClearanceJobsPage() {
+  const cards = uniqueNodes(
+    Array.from(document.querySelectorAll('.job-search-list-item-desktop')).filter((node) => isVisible(node))
+  );
+  const detail = captureClearanceJobsDetailPage();
+  if (cards.length === 0 && detail) {
+    return buildCapturePayload('clearance_job', 'ClearanceJobs', detail.company || detail.title, [detail]);
+  }
+  const jobs = uniqueJobs(cards.map((card) => {
+    const anchor = firstNode(card, ['a.job-search-list-item-desktop__job-name', 'a[href*="/jobs/"]']);
+    const url = absoluteUrl(anchor?.href || '');
+    if (!anchor || !url) {
+      return null;
+    }
+    const locationText = firstText(card, ['.job-search-list-item-desktop__location', '.location']);
+    const summary = firstText(card, ['.job-search-list-item-desktop__description', '.job-description', 'p']);
+    const footerTexts = clearanceCardMetaTexts(card);
+    const postedAt = footerTexts.find((value) => /^posted\b/i.test(value)) || '';
+    return {
+      raw_id: url,
+      title: text(anchor),
+      company: firstText(card, ['.job-search-list-item-desktop__company-name', '.company']),
+      location: locationText,
+      summary,
+      description: '',
+      requirements_text: joinUniqueTexts([
+        summary,
+        ...footerTexts.filter((value) => value && value !== postedAt && normalizeText(value).toLowerCase() !== normalizeText(locationText).toLowerCase()),
+      ]),
+      salary_text: firstMeaningfulSalaryText([
+        summary,
+        ...footerTexts,
+        ...texts(card, ['.salary', '.salary-range', '.compensation', '[class*="salary"]']),
+      ]),
+      employment_text: joinUniqueTexts(
+        footerTexts.filter((value) => looksLikeEmploymentText(value) && normalizeText(value).toLowerCase() !== normalizeText(locationText).toLowerCase())
+      ),
+      url,
+      posted_at: postedAt,
+    };
+  }));
+  if (jobs.length === 0 && detail) {
+    jobs.push(detail);
+  }
+  const label = firstText(document, ['h1', '.job-search-title']) || document.title;
+  return buildCapturePayload('clearance_search', 'ClearanceJobs', label, jobs);
+}
+
+function captureClearanceJobsDetailPage() {
+  const title = firstText(document, [
+    'h1.job-view-header-content__top__job-name',
+    '.job-view-header-content__top__job-name',
+    'h1',
+  ]);
+  if (!title) {
+    return null;
+  }
+  const description = firstText(document, ['.job-description']) || '';
+  const requirementsText = firstText(document, ['.job-info']) || '';
+  const locationText = firstText(document, [
+    '.job-info .job-fit__nonSkills--location .el-tag__content',
+    '.job-view-header-content__top__location',
+  ]);
+  const salaryText = firstMeaningfulSalaryText([
+    ...texts(document, [
+      '.job-info .job-fit__nonSkills--salary .el-tag__content',
+      '.job-info .salary-estimate-link',
+      '.job-info [class*="salary"]',
+    ]),
+    requirementsText,
+    description,
+  ]);
+  return {
+    raw_id: absoluteUrl(location.href),
+    title,
+    company: firstText(document, [
+      'h2.job-view-header-content__top__job-company',
+      '.job-view-header-content__top__job-company a',
+      '.job-view-header-content__top__job-company',
+    ]),
+    location: locationText,
+    summary: excerpt(description, 280),
+    description,
+    requirements_text: requirementsText,
+    salary_text: salaryText,
+    employment_text: joinUniqueTexts(
+      texts(document, [
+        '.job-info .job-fit__nonSkills--careerLevel .el-tag__content',
+        '.job-info .job-fit__nonSkills--location .el-tag__content',
+      ]).filter((value) => value && value !== salaryText && normalizeText(value).toLowerCase() !== normalizeText(locationText).toLowerCase() && !looksLikeClearanceText(value) && !looksLikePlaceholderMeta(value))
+    ),
+    url: absoluteUrl(location.href),
+    posted_at: firstText(document, ['time', '.posted-date']),
+  };
 }
 
 function captureIndeedSelectedDetail(rawIdHint = '', options = {}) {
@@ -540,6 +639,28 @@ function indeedCardMetaTexts(container) {
   ]).filter((value) => isCompactCardMeta(value));
 }
 
+function clearanceCardMetaTexts(container) {
+  const values = [];
+  const seen = new Set();
+  for (const group of container.querySelectorAll('.job-search-list-item-desktop__footer > div')) {
+    const nodes = Array.from(group.children).filter((node) => node instanceof HTMLElement);
+    const candidates = nodes.length ? nodes : [group];
+    for (const node of candidates) {
+      const value = text(node);
+      if (!value) {
+        continue;
+      }
+      const folded = value.toLowerCase();
+      if (seen.has(folded)) {
+        continue;
+      }
+      seen.add(folded);
+      values.push(value);
+    }
+  }
+  return values;
+}
+
 function isCompactCardMeta(value) {
   const textValue = normalizeText(value);
   if (!textValue) {
@@ -553,6 +674,46 @@ function isCompactCardMeta(value) {
 
 function looksLikeEmploymentText(value) {
   return /\b(?:contract|full[\s-]?time|part[\s-]?time|temporary|temp[\s-]?to[\s-]?hire|internship|day shift|night shift|overnight|weekends?|overtime|monday to friday|remote|hybrid|on[\s-]?site)\b/i.test(normalizeText(value));
+}
+
+function looksLikePlaceholderMeta(value) {
+  const textValue = normalizeText(value).toLowerCase();
+  if (!textValue) {
+    return true;
+  }
+  return [
+    'unspecified',
+    'not specified',
+    'salary not specified',
+    'clearance unspecified',
+    'career level not specified',
+  ].includes(textValue);
+}
+
+function looksLikeClearanceText(value) {
+  return /\b(?:clearance|polygraph|public trust|top secret|secret|ts\/sci|sci|ci poly|full scope)\b/i.test(normalizeText(value));
+}
+
+function joinUniqueTexts(values) {
+  const output = [];
+  const seen = new Set();
+  for (const value of values) {
+    const normalized = normalizeText(value);
+    if (!normalized) {
+      continue;
+    }
+    const folded = normalized.toLowerCase();
+    if (seen.has(folded)) {
+      continue;
+    }
+    seen.add(folded);
+    output.push(normalized);
+  }
+  return output.join(' | ');
+}
+
+function firstMeaningfulSalaryText(values) {
+  return firstSalaryText(values.filter((value) => value && !looksLikePlaceholderMeta(value)));
 }
 
 function titlesProbablyMatch(left, right) {
@@ -575,6 +736,9 @@ function siteNameFromHost(host) {
   }
   if (folded.includes('indeed')) {
     return 'Indeed';
+  }
+  if (folded.includes('clearancejobs')) {
+    return 'ClearanceJobs';
   }
   return normalizeText(folded.replace(/^www\./, '').split('.')[0].replace(/-/g, ' ')) || 'Web';
 }

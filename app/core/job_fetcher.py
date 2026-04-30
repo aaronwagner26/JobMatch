@@ -13,14 +13,14 @@ from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 import httpx
 from bs4 import BeautifulSoup
 
 from app.core.normalizer import JobNormalizer
 from app.core.types import JobSourceConfig, NormalizedJob, ScanResult
-from app.utils.skills import extract_salary_info, format_salary_display
+from app.utils.skills import extract_clearance_info, extract_salary_info, format_salary_display
 from app.utils.config import (
     BROWSER_PROFILES_DIR,
     DEFAULT_BROWSER_CHALLENGE_WAIT_SECONDS,
@@ -840,6 +840,10 @@ class JobFetcher:
 
     def _parse_job_detail_payload(self, html: str, url: str, source: JobSourceConfig) -> dict[str, Any] | None:
         soup = BeautifulSoup(html, "html.parser")
+        if self._determine_source_type(source) == "clearance" or "clearancejobs.com" in urlsplit(url).netloc.casefold():
+            payload = self._parse_clearance_job_detail_payload(soup, url)
+            if payload:
+                return payload
         json_ld_jobs = self._extract_json_ld_jobs(soup, url)
         if json_ld_jobs:
             payload = dict(json_ld_jobs[0])
@@ -914,6 +918,81 @@ class JobFetcher:
             "employment_text": employment_text,
             "url": url,
             "posted_at": self._first_text(soup, [".date", "[data-testid='myJobsStateDate']", "time"]),
+        }
+
+    def _parse_clearance_job_detail_payload(self, soup: BeautifulSoup, url: str) -> dict[str, Any] | None:
+        title = self._first_text(
+            soup,
+            [
+                "h1.job-view-header-content__top__job-name",
+                ".job-view-header-content__top__job-name",
+                "h1",
+            ],
+        )
+        if not title:
+            return None
+        requirements_block = soup.select_one(".job-info")
+        description_block = soup.select_one(".job-description")
+        description = clean_job_text(str(description_block)) if description_block else ""
+        requirements_text = clean_job_text(str(requirements_block)) if requirements_block else ""
+        location = self._first_text(
+            soup,
+            [
+                ".job-info .job-fit__nonSkills--location .el-tag__content",
+                ".job-view-header-content__top__location",
+                "[data-testid='job-location']",
+            ],
+        )
+        salary_text = self._best_salary_from_texts(
+            [
+                *self._collect_texts(
+                    soup,
+                    [
+                        ".job-info .job-fit__nonSkills--salary .el-tag__content",
+                        ".job-info .salary-estimate-link",
+                        ".job-info [class*='salary']",
+                    ],
+                ),
+                description,
+                requirements_text,
+            ]
+        )
+        employment_text = self._join_unique_texts(
+            [
+                value
+                for value in self._collect_texts(
+                    soup,
+                    [
+                        ".job-info .job-fit__nonSkills--careerLevel .el-tag__content",
+                        ".job-info .job-fit__nonSkills--location .el-tag__content",
+                        ".job-info .job-fit__nonSkills--required .el-tag__content",
+                    ],
+                )
+                if value
+                and value != salary_text
+                and value.casefold() != location.casefold()
+                and not self._looks_like_clearance_token(value)
+                and not self._looks_like_placeholder_meta(value)
+            ]
+        )
+        return {
+            "raw_id": url,
+            "title": title,
+            "company": self._first_text(
+                soup,
+                [
+                    "h2.job-view-header-content__top__job-company",
+                    ".job-view-header-content__top__job-company a",
+                    ".job-view-header-content__top__job-company",
+                ],
+            ),
+            "location": location,
+            "description": description,
+            "requirements_text": requirements_text,
+            "salary_text": salary_text,
+            "employment_text": employment_text,
+            "url": url,
+            "posted_at": self._first_text(soup, [".job-view-header-content time", ".posted-date", "time"]),
         }
 
     def _prepare_payload(
@@ -997,8 +1076,14 @@ class JobFetcher:
 
     def _parse_clearance_html(self, soup: BeautifulSoup, base_url: str) -> list[dict[str, Any]]:
         jobs: list[dict[str, Any]] = []
-        for container in soup.select("article, .job, .job-listing, li"):
-            anchor = container.find("a", href=True)
+        containers = soup.select(".job-search-list-item-desktop")
+        site_specific = bool(containers)
+        if not containers:
+            containers = soup.select("article, .job, .job-listing, li")
+        for container in containers:
+            anchor = container.select_one("a.job-search-list-item-desktop__job-name[href]") if site_specific else None
+            if anchor is None:
+                anchor = container.find("a", href=True)
             if anchor is None:
                 continue
             href = anchor.get("href", "")
@@ -1007,16 +1092,71 @@ class JobFetcher:
             title = normalize_whitespace(anchor.get_text(" "))
             if len(title) < 3:
                 continue
+            summary = self._first_text(
+                container,
+                [
+                    ".job-search-list-item-desktop__description",
+                    ".description",
+                    ".job-description",
+                    "p",
+                ],
+            )
+            location = self._first_text(
+                container,
+                [
+                    ".job-search-list-item-desktop__location",
+                    ".location",
+                    ".job-location",
+                    "[data-testid='location']",
+                ],
+            )
+            compact_tokens = self._clearance_footer_tokens(container)
+            posted_at = next((value for value in compact_tokens if value.casefold().startswith("posted")), "")
+            requirements_text = self._join_unique_texts(
+                [
+                    summary,
+                    *[
+                        value
+                        for value in compact_tokens
+                        if value
+                        and value != posted_at
+                        and value.casefold() != location.casefold()
+                    ],
+                ]
+            )
             jobs.append(
                 {
                     "raw_id": href,
                     "title": title,
-                    "company": self._first_text(container, [".company", ".job-company", "[data-testid='company']"]),
-                    "location": self._first_text(container, [".location", ".job-location", "[data-testid='location']"]),
-                    "summary": self._first_text(container, [".description", ".job-description", "p"]),
-                    "salary_text": self._best_salary_text(container, [".salary", ".salary-range", ".compensation", "[class*='salary']"]),
+                    "company": self._first_text(
+                        container,
+                        [
+                            ".job-search-list-item-desktop__company-name",
+                            ".company",
+                            ".job-company",
+                            "[data-testid='company']",
+                        ],
+                    ),
+                    "location": location,
+                    "summary": summary,
+                    "requirements_text": requirements_text,
+                    "salary_text": self._best_salary_from_texts(
+                        [
+                            summary,
+                            *compact_tokens,
+                            *self._collect_texts(container, [".salary", ".salary-range", ".compensation", "[class*='salary']"]),
+                        ]
+                    ),
                     "url": absolute_url(base_url, href),
-                    "employment_text": self._first_text(container, [".employment-type", ".job-type"]),
+                    "employment_text": self._join_unique_texts(
+                        [
+                            value
+                            for value in compact_tokens
+                            if self._looks_like_employment_fragment(value) and value.casefold() != location.casefold()
+                        ]
+                    ),
+                    "posted_at": posted_at,
+                    "metadata": {"clearance_footer_tokens": compact_tokens},
                 }
             )
         jobs.extend(self._extract_json_ld_jobs(soup, base_url))
@@ -1080,6 +1220,10 @@ class JobFetcher:
             if label in {"next", "next page", "older", "more jobs"} or label.startswith("next "):
                 return absolute_url(base_url, anchor.get("href"))
 
+        if parser == "clearance":
+            next_url = self._clearance_next_page_url(soup, base_url)
+            if next_url:
+                return next_url
         if parser == "indeed":
             for anchor in soup.select("a[href*='start=']"):
                 label = normalize_whitespace(anchor.get("aria-label") or anchor.get_text(" ")).casefold()
@@ -1148,36 +1292,53 @@ class JobFetcher:
         async def enrich(job: dict[str, Any]) -> None:
             async with semaphore:
                 self._raise_if_cancelled(cancel_requested)
+                detail_html = ""
+                detail_url = str(job["url"])
                 try:
                     response = await self._request_text(
                         source,
-                        job["url"],
+                        detail_url,
                         throttle=throttle,
                         conditional=False,
                         cancel_requested=cancel_requested,
                     )
-                    soup = BeautifulSoup(response.text, "html.parser")
+                    detail_html = response.text
                 except httpx.HTTPStatusError as exc:
                     status_code = exc.response.status_code if exc.response is not None else None
                     if status_code not in {403, 429} or not allow_dynamic_detail_fallback:
                         return
                     logger.info(
                         "Falling back to Playwright for detail page %s after HTTP %s",
-                        job["url"],
+                        detail_url,
                         status_code,
                     )
-                    dynamic_html = await self._fetch_dynamic_html(
-                        source,
-                        job["url"],
-                        cancel_requested=cancel_requested,
-                    )
-                    if not dynamic_html:
+                    detail_html = await self._fetch_dynamic_html(source, detail_url, cancel_requested=cancel_requested) or ""
+                    if not detail_html:
                         return
-                    if self._looks_like_security_check(dynamic_html):
+                    if self._looks_like_security_check(detail_html):
                         return
-                    soup = BeautifulSoup(dynamic_html, "html.parser")
                 except Exception:
                     return
+                payload = self._parse_job_detail_payload(detail_html, detail_url, source)
+                if payload is not None:
+                    for field in [
+                        "title",
+                        "company",
+                        "location",
+                        "description",
+                        "requirements_text",
+                        "preferred_text",
+                        "salary_text",
+                        "employment_text",
+                        "job_type",
+                        "remote_mode",
+                        "posted_at",
+                    ]:
+                        value = payload.get(field)
+                        if value:
+                            job[field] = value
+                    return
+                soup = BeautifulSoup(detail_html, "html.parser")
                 primary = soup.select_one("#jobDescriptionText, .jobDescriptionText, .posting, .job-description")
                 if primary:
                     job["description"] = clean_job_text(str(primary))
@@ -1598,6 +1759,112 @@ class JobFetcher:
             return False
         known_ratio = known_count / len(page_jobs)
         return known_ratio >= DEFAULT_EARLY_STOP_KNOWN_RATIO and new_or_changed_count <= max(1, len(page_jobs) // 6)
+
+    @staticmethod
+    def _clearance_footer_tokens(container) -> list[str]:
+        tokens: list[str] = []
+        seen: set[str] = set()
+        if container is None:
+            return tokens
+        groups = container.select(".job-search-list-item-desktop__footer > div")
+        if not groups:
+            groups = container.select(".job-search-list-item-desktop__footer")
+        for group in groups:
+            nodes = group.find_all("div", recursive=False) if hasattr(group, "find_all") else []
+            if not nodes:
+                nodes = [group]
+            for node in nodes:
+                text = clean_job_text(str(node))
+                if not text:
+                    continue
+                folded = text.casefold()
+                if folded in seen:
+                    continue
+                seen.add(folded)
+                tokens.append(text)
+        return tokens
+
+    @staticmethod
+    def _looks_like_placeholder_meta(value: str) -> bool:
+        folded = normalize_whitespace(value).casefold()
+        if not folded:
+            return True
+        return folded in {
+            "unspecified",
+            "not specified",
+            "salary not specified",
+            "clearance unspecified",
+            "career level not specified",
+        }
+
+    @staticmethod
+    def _looks_like_employment_fragment(value: str) -> bool:
+        return bool(
+            re.search(
+                r"\b(?:full[\s-]?time|part[\s-]?time|contract|temporary|temp[\s-]?to[\s-]?hire|internship|day shift|night shift|weekends?|overtime|monday to friday)\b",
+                normalize_whitespace(value),
+                flags=re.IGNORECASE,
+            )
+        )
+
+    @staticmethod
+    def _looks_like_clearance_token(value: str) -> bool:
+        return bool(extract_clearance_info(value).get("terms"))
+
+    @staticmethod
+    def _join_unique_texts(values: list[str]) -> str:
+        output: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            normalized = normalize_whitespace(value)
+            if not normalized:
+                continue
+            folded = normalized.casefold()
+            if folded in seen:
+                continue
+            seen.add(folded)
+            output.append(normalized)
+        return normalize_whitespace(" | ".join(output))
+
+    @staticmethod
+    def _best_salary_from_texts(values: list[str]) -> str:
+        ranked = sorted(
+            (
+                normalize_whitespace(value)
+                for value in values
+                if normalize_whitespace(value) and not JobFetcher._looks_like_placeholder_meta(value)
+            ),
+            key=JobFetcher._salary_text_rank,
+            reverse=True,
+        )
+        for value in ranked:
+            if extract_salary_info(value).get("display"):
+                return value
+        return ""
+
+    @staticmethod
+    def _clearance_next_page_url(soup: BeautifulSoup, base_url: str) -> str | None:
+        current_label = normalize_whitespace(
+            JobFetcher._first_text(soup, [".job-search-pagination .btn--selected", ".cj-pagination .btn--selected"])
+        )
+        page_numbers = [
+            int(value)
+            for value in JobFetcher._collect_texts(soup, [".job-search-pagination .btn", ".cj-pagination .btn"])
+            if value.isdigit()
+        ]
+        has_next = bool(soup.select_one(".job-search-pagination .btn--next:not([disabled]), .cj-pagination .btn--next:not([disabled])"))
+        if not has_next and not page_numbers:
+            return None
+        query_pairs = dict(parse_qsl(urlsplit(base_url).query, keep_blank_values=True))
+        try:
+            current_page = int(current_label) if current_label.isdigit() else int(query_pairs.get("page", "1"))
+        except ValueError:
+            current_page = 1
+        if page_numbers and current_page >= max(page_numbers):
+            return None
+        query_pairs["page"] = str(current_page + 1)
+        parts = urlsplit(base_url)
+        return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query_pairs, doseq=True), parts.fragment))
 
     @staticmethod
     def _first_text(container, selectors: list[str]) -> str:

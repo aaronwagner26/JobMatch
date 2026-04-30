@@ -615,3 +615,96 @@ def test_engine_deduplicates_cross_source_jobs_by_canonical_url() -> None:
 
     assert len(deduped) == 1
     assert deduped[0].source_name == "Source B"
+
+
+def test_parse_clearance_search_page_uses_site_specific_selectors() -> None:
+    fetcher = JobFetcher(JobNormalizer())
+    source_url = "https://www.clearancejobs.com/jobs?remote=1&keywords=information+technology&limit=50&sort_info=timestamp+desc"
+    html = """
+    <html>
+      <body>
+        <div class="job-search-list-item-desktop">
+          <a class="job-search-list-item-desktop__job-name" href="/jobs/8890517/systems-admin-m365-admin-migration-102119">
+            Systems Admin - M365 Admin - Migration 102119
+          </a>
+          <div class="job-search-list-item-desktop__company-name">Information Technology Engineering Corporation</div>
+          <div class="job-search-list-item-desktop__location">Remote/Hybrid United States (On-Site/Office)</div>
+          <div class="job-search-list-item-desktop__description">
+            Systems Admin-M365 Admin-Migration Location: Remote Required Clearance: Top Secret/DOE Q
+          </div>
+          <div class="job-search-list-item-desktop__footer">
+            <div><div>Remote/Hybrid United States (On-Site/Office)</div></div>
+            <div><div>Posted today</div><div>Unspecified</div><div>None</div></div>
+            <div></div>
+          </div>
+        </div>
+        <div class="job-search-pagination">
+          <div class="cj-pagination">
+            <button class="btn--selected btn">1</button>
+            <button class="btn">2</button>
+            <button class="btn btn--next"></button>
+          </div>
+        </div>
+      </body>
+    </html>
+    """
+
+    jobs, next_url = fetcher._parse_html_jobs(html, source_url, parser="clearance")
+
+    assert len(jobs) == 1
+    assert jobs[0]["title"] == "Systems Admin - M365 Admin - Migration 102119"
+    assert jobs[0]["company"] == "Information Technology Engineering Corporation"
+    assert jobs[0]["location"] == "Remote/Hybrid United States (On-Site/Office)"
+    assert "Top Secret/DOE Q" in jobs[0]["requirements_text"]
+    assert jobs[0]["posted_at"] == "Posted today"
+    assert next_url == (
+        "https://www.clearancejobs.com/jobs?remote=1&keywords=information+technology"
+        "&limit=50&sort_info=timestamp+desc&page=2"
+    )
+
+
+def test_parse_clearance_detail_payload_prefers_requirements_and_description() -> None:
+    fetcher = JobFetcher(JobNormalizer())
+    source = JobSourceConfig(
+        id=12,
+        name="ClearanceJobs Search",
+        source_type="clearance",
+        url="https://www.clearancejobs.com/jobs/8890517/systems-admin-m365-admin-migration-102119",
+        request_delay_ms=0,
+    )
+    html = """
+    <html>
+      <body>
+        <h1 class="job-view-header-content__top__job-name">Systems Admin - M365 Admin - Migration 102119</h1>
+        <h2 class="job-view-header-content__top__job-company">Information Technology Engineering Corporation</h2>
+        <div class="job-info">
+          <h3 class="job-section-title">Job Requirements</h3>
+          <div class="job-fit__nonSkills--required">
+            <div class="job-fit__nonSkills--location"><span class="el-tag__content">Remote</span></div>
+            <div class="job-fit__nonSkills--clearance">
+              <span class="el-tag__content">Clearance Unspecified</span>
+              <span class="el-tag__content">Polygraph None</span>
+            </div>
+            <div class="job-fit__nonSkills--salary">
+              <span class="el-tag__content">Salary not specified</span>
+            </div>
+          </div>
+        </div>
+        <div class="job-description">
+          <h3 class="job-section-title">Job Description</h3>
+          <p>Location: Remote</p>
+          <p>Required Clearance: Top Secret/DOE Q</p>
+        </div>
+      </body>
+    </html>
+    """
+
+    payload = fetcher._parse_job_detail_payload(html, source.url, source)
+
+    assert payload is not None
+    assert payload["title"] == "Systems Admin - M365 Admin - Migration 102119"
+    assert payload["company"] == "Information Technology Engineering Corporation"
+    assert payload["location"] == "Remote"
+    assert "Required Clearance: Top Secret/DOE Q" in payload["description"]
+    assert "Clearance Unspecified" in payload["requirements_text"]
+    assert payload["salary_text"] == ""
