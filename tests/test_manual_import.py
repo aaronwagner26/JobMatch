@@ -3,7 +3,7 @@ from __future__ import annotations
 from app.core.engine import JobMatchEngine
 from app.core.job_fetcher import JobFetcher
 from app.core.normalizer import JobNormalizer
-from app.core.types import JobSourceConfig
+from app.core.types import JobSourceConfig, NormalizedJob
 from app.db.storage import Storage
 
 
@@ -66,3 +66,61 @@ def test_scheduler_skips_manual_assist_sources() -> None:
     assert custom.id is not None
 
     assert engine.should_run_scheduled_scan() is True
+
+
+def test_clear_scan_results_resets_cached_jobs_and_scan_state() -> None:
+    storage = Storage("sqlite+pysqlite:///:memory:")
+    engine = JobMatchEngine(storage=storage)
+    source = engine.save_source(
+        JobSourceConfig(
+            id=None,
+            name="Company Board",
+            source_type="custom_url",
+            url="https://example.com/jobs",
+            enabled=True,
+        )
+    )
+    assert source.id is not None
+
+    job = NormalizedJob(
+        id=None,
+        source_id=source.id,
+        source_name=source.name,
+        source_type=source.source_type,
+        external_id="job-1",
+        title="Platform Engineer",
+        company="Example Co",
+        location="Remote",
+        remote_mode="remote",
+        job_type="full-time",
+        clearance_terms=[],
+        posted_at=None,
+        url="https://example.com/jobs/platform-engineer",
+        description="Python and AWS role",
+        summary_text="Python and AWS role",
+        skills=["Python", "AWS"],
+        required_skills=["Python"],
+        preferred_skills=["AWS"],
+        experience_years=4.0,
+        employment_text="Full-time",
+        metadata={},
+        content_hash="hash-1",
+    )
+    storage.upsert_jobs(source, [job])
+    scan_id = storage.begin_scan(source.id)
+    storage.update_source_scan_state(source.id, status="ok", etag="etag-1", last_modified="Wed, 01 Jan 2025 00:00:00 GMT")
+    storage.finish_scan(scan_id, status="ok", jobs_found=1, jobs_created=1)
+
+    assert storage.list_jobs()
+    assert storage.list_scans()
+
+    engine.clear_scan_results()
+
+    assert storage.list_jobs() == []
+    assert storage.list_scans() == []
+    cleared_source = engine.get_source(source.id)
+    assert cleared_source is not None
+    assert cleared_source.etag is None
+    assert cleared_source.last_modified is None
+    assert cleared_source.last_scan_at is None
+    assert cleared_source.last_status is None

@@ -194,6 +194,7 @@ class JobMatchUI:
         self.last_scan_label = None
         self.scan_button = None
         self.stop_scan_button = None
+        self.clear_results_button = None
         self.scan_summary_panel = None
         self.scan_log_panel = None
         self.scan_log_widget = None
@@ -217,6 +218,11 @@ class JobMatchUI:
                     ui.switch("Dark", value=False, on_change=lambda e: self.dark_mode.set_value(e.value)).classes("text-white")
                     self.scan_button = ui.button("Scan now", icon="sync", on_click=lambda: asyncio.create_task(self.handle_scan())).props("unelevated")
                     self.stop_scan_button = ui.button("Stop scan", icon="stop_circle", on_click=self.request_scan_stop).props("flat color=negative")
+                    self.clear_results_button = ui.button(
+                        "Start fresh",
+                        icon="delete_sweep",
+                        on_click=lambda: asyncio.create_task(self.clear_scan_results()),
+                    ).props("flat color=warning")
                     self.stop_scan_button.disable()
 
         with ui.left_drawer(value=True, bordered=False, elevated=False).classes("app-drawer w-72"):
@@ -749,6 +755,8 @@ class JobMatchUI:
             self.scan_button.disable()
         if self.stop_scan_button:
             self.stop_scan_button.enable()
+        if self.clear_results_button:
+            self.clear_results_button.disable()
         self.state.scan_running = True
         self.state.scan_stop_requested = False
         self.state.scan_error = ""
@@ -781,6 +789,8 @@ class JobMatchUI:
                 self.scan_button.enable()
             if self.stop_scan_button:
                 self.stop_scan_button.disable()
+            if self.clear_results_button:
+                self.clear_results_button.enable()
             self.state.recent_scans = self.engine.list_recent_scans(limit=8)
             if self.status_label.text == "Scanning sources...":
                 self.status_label.set_text("Ready")
@@ -809,6 +819,34 @@ class JobMatchUI:
             return
         if self.engine.should_run_scheduled_scan():
             await self.handle_scan(background=True)
+
+    async def clear_scan_results(self) -> None:
+        if self._client_deleted:
+            return
+        if self.state.scan_running:
+            self._notify("Stop the active scan before clearing cached results.", type="warning")
+            return
+        self.status_label.set_text("Clearing cached results...")
+        try:
+            await asyncio.to_thread(self.engine.clear_scan_results)
+            self.state.matches = []
+            self.state.match_error = ""
+            self.state.scan_error = ""
+            self.state.scan_status = "Ready"
+            self.state.scan_source_total = 0
+            self.state.scan_sources_finished = 0
+            self.state.scan_rows = []
+            self.state.recent_scans = []
+            self.state.scan_log_lines = []
+            self.last_scan_label.set_text("Last scan: never")
+            self._append_activity("Cleared cached jobs, scan history, and source cache state.")
+            self._notify("Cleared cached jobs and scan history.", type="positive")
+        except Exception as exc:
+            self._append_activity(f"Clearing cached results failed: {exc}")
+            self._notify(f"Could not clear cached results: {exc}", type="negative")
+        finally:
+            self.status_label.set_text("Ready")
+            self.render_current_view()
 
     async def handle_resume_upload(self, event: events.UploadEventArguments) -> None:
         if self._client_deleted:

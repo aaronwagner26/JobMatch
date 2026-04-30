@@ -93,6 +93,11 @@ class JobMatchEngine:
     def update_settings(self, values: dict) -> None:
         self.storage.update_settings(values)
 
+    def clear_scan_results(self) -> None:
+        if self._scan_lock.locked():
+            raise RuntimeError("Stop the active scan before clearing cached results.")
+        self.storage.clear_scan_results()
+
     def cancel_scan(self) -> bool:
         if not self._scan_lock.locked():
             return False

@@ -423,6 +423,17 @@ class Storage:
         with self.session() as session:
             session.execute(delete(JobRecord).where(JobRecord.source_id == source_id))
 
+    def clear_scan_results(self) -> None:
+        with self.session() as session:
+            session.execute(delete(JobRecord))
+            session.execute(delete(ScanRecord))
+            records = session.scalars(select(SourceRecord)).all()
+            for record in records:
+                record.etag = None
+                record.last_modified = None
+                record.last_scan_at = None
+                record.last_status = None
+
     def _migrate_db(self) -> None:
         inspector = inspect(self.engine)
         if not inspector.has_table("sources"):
