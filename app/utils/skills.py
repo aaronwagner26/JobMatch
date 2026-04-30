@@ -370,60 +370,88 @@ def extract_salary_info(text: str | None) -> dict[str, object]:
     if not normalized:
         return {"minimum": None, "maximum": None, "currency": None, "interval": None, "display": None}
 
-    for pattern in SALARY_RANGE_PATTERNS:
-        match = pattern.search(normalized)
-        if not match:
-            continue
-        window = normalized[max(0, match.start() - 24) : min(len(normalized), match.end() + 24)]
-        has_currency = bool(match.group("currency1") or match.group("currency2") or "$" in window or "usd" in window.casefold())
-        has_compensation_context = bool(
-            re.search(r"\b(salary|compensation|pay|rate|hourly|annual|base)\b", window, flags=re.IGNORECASE)
-        )
-        if not has_currency and not has_compensation_context:
-            continue
-        if re.search(r"\byears?(?:\s+of)?\s+experience\b", window, flags=re.IGNORECASE):
-            continue
-        minimum = _parse_salary_amount(match.group("min"))
-        maximum = _parse_salary_amount(match.group("max"))
-        if minimum is None or maximum is None or maximum < minimum:
-            continue
-        interval = _detect_salary_interval(match.group("suffix") or normalized)
-        currency = "USD" if (match.group("currency1") or match.group("currency2") or "$") else "USD"
-        return {
-            "minimum": minimum,
-            "maximum": maximum,
-            "currency": currency,
-            "interval": interval,
-            "display": format_salary_display(minimum, maximum, currency=currency, interval=interval),
-        }
+    best_match: dict[str, object] | None = None
+    best_score: tuple[int, int, int] | None = None
 
-    for pattern in SALARY_SINGLE_PATTERNS:
-        match = pattern.search(normalized)
-        if not match:
-            continue
-        window = normalized[max(0, match.start() - 24) : min(len(normalized), match.end() + 24)]
-        has_currency = bool(match.groupdict().get("currency") or "$" in window or "usd" in window.casefold())
-        has_compensation_context = bool(
-            re.search(r"\b(salary|compensation|pay|rate|hourly|annual|base|starting at|starts at|minimum of|maximum of|up to)\b", window, flags=re.IGNORECASE)
-        )
-        if not has_currency and not has_compensation_context:
-            continue
-        if re.search(r"\byears?(?:\s+of)?\s+experience\b", window, flags=re.IGNORECASE):
-            continue
-        amount = _parse_salary_amount(match.group("amount"))
-        if amount is None:
-            continue
-        interval = _detect_salary_interval(match.group("suffix") or normalized)
-        currency = "USD" if (match.group("currency") or "$") else "USD"
-        return {
-            "minimum": amount,
-            "maximum": amount,
-            "currency": currency,
-            "interval": interval,
-            "display": format_salary_display(amount, amount, currency=currency, interval=interval),
-        }
+    for segment in _salary_search_segments(normalized):
+        for pattern in SALARY_RANGE_PATTERNS:
+            for match in pattern.finditer(segment):
+                window = segment[max(0, match.start() - 24) : min(len(segment), match.end() + 48)]
+                has_currency = bool(match.group("currency1") or match.group("currency2") or "$" in window or "usd" in window.casefold())
+                has_compensation_context = bool(
+                    re.search(r"\b(salary|compensation|pay|rate|hourly|annual|base)\b", window, flags=re.IGNORECASE)
+                )
+                if not has_currency and not has_compensation_context:
+                    continue
+                if re.search(r"\byears?(?:\s+of)?\s+experience\b", window, flags=re.IGNORECASE):
+                    continue
+                if re.search(r"\b\d+(?:\.\d+)?\s*(?:-|to|and|through)\s*\d+(?:\.\d+)?\s+years?\b", window, flags=re.IGNORECASE):
+                    continue
+                minimum = _parse_salary_amount(match.group("min"))
+                maximum = _parse_salary_amount(match.group("max"))
+                if minimum is None or maximum is None or maximum < minimum:
+                    continue
+                interval = _detect_salary_interval(match.group("suffix") or window)
+                currency = "USD" if (match.group("currency1") or match.group("currency2") or "$") else "USD"
+                candidate = {
+                    "minimum": minimum,
+                    "maximum": maximum,
+                    "currency": currency,
+                    "interval": interval,
+                    "display": format_salary_display(minimum, maximum, currency=currency, interval=interval),
+                }
+                score = _salary_candidate_score(
+                    window,
+                    minimum=minimum,
+                    maximum=maximum,
+                    has_currency=has_currency,
+                    has_compensation_context=has_compensation_context,
+                    interval=interval,
+                )
+                if best_score is None or score > best_score:
+                    best_match = candidate
+                    best_score = score
 
-    return {"minimum": None, "maximum": None, "currency": None, "interval": None, "display": None}
+        for pattern in SALARY_SINGLE_PATTERNS:
+            for match in pattern.finditer(segment):
+                window = segment[max(0, match.start() - 24) : min(len(segment), match.end() + 48)]
+                has_currency = bool(match.groupdict().get("currency") or "$" in window or "usd" in window.casefold())
+                has_compensation_context = bool(
+                    re.search(
+                        r"\b(salary|compensation|pay|rate|hourly|annual|base|starting at|starts at|minimum of|maximum of|up to)\b",
+                        window,
+                        flags=re.IGNORECASE,
+                    )
+                )
+                if not has_currency and not has_compensation_context:
+                    continue
+                if re.search(r"\byears?(?:\s+of)?\s+experience\b", window, flags=re.IGNORECASE):
+                    continue
+                amount = _parse_salary_amount(match.group("amount"))
+                if amount is None:
+                    continue
+                interval = _detect_salary_interval(match.group("suffix") or window)
+                currency = "USD" if (match.group("currency") or "$") else "USD"
+                candidate = {
+                    "minimum": amount,
+                    "maximum": amount,
+                    "currency": currency,
+                    "interval": interval,
+                    "display": format_salary_display(amount, amount, currency=currency, interval=interval),
+                }
+                score = _salary_candidate_score(
+                    window,
+                    minimum=amount,
+                    maximum=amount,
+                    has_currency=has_currency,
+                    has_compensation_context=has_compensation_context,
+                    interval=interval,
+                )
+                if best_score is None or score > best_score:
+                    best_match = candidate
+                    best_score = score
+
+    return best_match or {"minimum": None, "maximum": None, "currency": None, "interval": None, "display": None}
 
 
 def format_salary_display(
@@ -569,7 +597,51 @@ def _detect_salary_interval(text: str | None) -> str | None:
     for interval, patterns in SALARY_INTERVAL_PATTERNS.items():
         if any(re.search(pattern, haystack, flags=re.IGNORECASE) for pattern in patterns):
             return interval
-    return "year"
+    return None
+
+
+def _salary_search_segments(text: str) -> list[str]:
+    segments: list[str] = [text]
+    seen = {text.casefold()}
+    for part in re.split(r"\s*\|\s*|\n+|(?<=[.;])\s+", text):
+        normalized = normalize_whitespace(part)
+        if len(normalized) < 3:
+            continue
+        folded = normalized.casefold()
+        if folded in seen:
+            continue
+        seen.add(folded)
+        segments.append(normalized)
+    return segments
+
+
+def _salary_candidate_score(
+    text: str,
+    *,
+    minimum: float | None,
+    maximum: float | None,
+    has_currency: bool,
+    has_compensation_context: bool,
+    interval: str | None,
+) -> tuple[int, int, int]:
+    score = 0
+    if has_currency:
+        score += 8
+    if has_compensation_context:
+        score += 4
+    if interval:
+        score += 5
+    if minimum is not None and maximum is not None and round(minimum, 2) != round(maximum, 2):
+        score += 8
+    if minimum is not None and minimum >= 1000:
+        score += 2
+    if maximum is not None and maximum >= 1000:
+        score += 2
+    if re.search(r"\bpay(?: range)?\b|\bsalary\b|\bcompensation\b", text, flags=re.IGNORECASE):
+        score += 2
+    if re.search(r"\b\d+(?:\.\d+)?\s*(?:-|to|and|through)\s*\d+(?:\.\d+)?\s+years?\b", text, flags=re.IGNORECASE):
+        score -= 12
+    return score, len(text), 1 if interval else 0
 
 
 def _normalize_skill_phrase(value: str | None) -> str:

@@ -192,7 +192,11 @@ function captureIndeedSelectedDetail(rawIdHint = '', options = {}) {
   const salaryCandidates = [
     ...texts(document, [
       '.salaryText',
+      '#salaryInfoAndJobType',
       '[data-testid="salaryInfoAndJobType"]',
+      '.jobsearch-OtherJobDetailsContainer',
+      '[data-testid="jobsearch-CollapsedEmbeddedHeader-salary"]',
+      '#jobDetailsSection [aria-label="Pay"]',
       '[data-testid="attribute_snippet_testid"]',
       '[class*="salary"]',
     ]),
@@ -548,12 +552,11 @@ function texts(root, selectors) {
 }
 
 function firstSalaryText(values) {
-  for (const value of values) {
-    if (looksLikeSalaryText(value)) {
-      return value;
-    }
-  }
-  return values[0] || '';
+  const ranked = values
+    .filter(Boolean)
+    .map((value) => ({ value, score: salaryScore(value) }))
+    .sort((left, right) => right.score - left.score || right.value.length - left.value.length);
+  return ranked[0]?.value || '';
 }
 
 function text(node) {
@@ -573,6 +576,33 @@ function looksLikeSalaryText(value) {
     return true;
   }
   return /\b(?:salary|compensation|pay|hourly|annual|year|month|week|day|hr|yr)\b/i.test(textValue);
+}
+
+function salaryScore(value) {
+  const textValue = normalizeText(value);
+  if (!textValue) {
+    return 0;
+  }
+  let score = 0;
+  if (looksLikeSalaryText(textValue)) {
+    score += 3;
+  }
+  if (/[$â‚¬Â£]|usd/i.test(textValue)) {
+    score += 8;
+  }
+  if (/\b(?:salary|compensation|pay(?: range)?|hourly|annual|per hour|per year|a year|an hour)\b/i.test(textValue)) {
+    score += 5;
+  }
+  if (/\d[\d,.]*(?:\s*[km])?\s*(?:-|to|and|through)\s*[$â‚¬Â£]?\s*\d/i.test(textValue)) {
+    score += 8;
+  }
+  if (/\b(?:per hour|an hour|hourly|per year|a year|annual(?:ly)?|per month|monthly|per week|weekly|per day|daily|\/hr|\/yr|\/wk|\/mo|\/day)\b/i.test(textValue)) {
+    score += 6;
+  }
+  if (/\b\d+(?:\.\d+)?\s*(?:-|to|and|through)\s*\d+(?:\.\d+)?\s+years?\b/i.test(textValue) && !/[$â‚¬Â£]|usd/i.test(textValue)) {
+    score -= 12;
+  }
+  return score + Math.min(textValue.length, 120) / 40;
 }
 
 function excerpt(value, limit) {
@@ -611,7 +641,7 @@ function jsonLdSalaryText(payload) {
     display += '/mo';
   } else if (unit.includes('day')) {
     display += '/day';
-  } else {
+  } else if (unit.includes('year') || unit.includes('annual')) {
     display += '/yr';
   }
   return display;

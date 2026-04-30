@@ -854,7 +854,11 @@ class JobFetcher:
             soup,
             [
                 ".salaryText",
+                "#salaryInfoAndJobType",
                 "[data-testid='salaryInfoAndJobType']",
+                ".jobsearch-OtherJobDetailsContainer",
+                "[data-testid='jobsearch-CollapsedEmbeddedHeader-salary']",
+                "#jobDetailsSection [aria-label='Pay']",
                 "[data-testid='attribute_snippet_testid']",
                 "[class*='salary']",
             ],
@@ -862,6 +866,7 @@ class JobFetcher:
         employment_text = self._joined_text(
             soup,
             [
+                "#salaryInfoAndJobType",
                 "[data-testid='salaryInfoAndJobType']",
                 "[data-testid='attribute_snippet_testid']",
             ],
@@ -973,6 +978,7 @@ class JobFetcher:
                             parent,
                             [
                                 ".salary-snippet",
+                                ".salary-snippet-container",
                                 ".estimated-salary",
                                 "[class*='salary']",
                                 "[data-testid='attribute_snippet_testid']",
@@ -1668,7 +1674,7 @@ class JobFetcher:
         except (TypeError, ValueError):
             return ""
         unit = str(value.get("unitText") or "").casefold()
-        interval = "year"
+        interval = None
         if "hour" in unit:
             interval = "hour"
         elif "day" in unit:
@@ -1677,4 +1683,40 @@ class JobFetcher:
             interval = "week"
         elif "month" in unit:
             interval = "month"
+        elif "year" in unit or "annual" in unit:
+            interval = "year"
         return format_salary_display(minimum, maximum, currency=currency, interval=interval) or ""
+
+    @staticmethod
+    def _best_salary_text(container, selectors: list[str]) -> str:
+        texts = JobFetcher._collect_texts(container, selectors)
+        if not texts:
+            return ""
+        ranked = sorted(texts, key=JobFetcher._salary_text_rank, reverse=True)
+        return ranked[0]
+
+    @staticmethod
+    def _salary_text_rank(text: str) -> tuple[int, int]:
+        info = extract_salary_info(text)
+        score = 0
+        if info.get("display"):
+            score += 20
+        minimum = info.get("minimum")
+        maximum = info.get("maximum")
+        if minimum is not None and maximum is not None:
+            score += 3
+            if round(float(minimum), 2) != round(float(maximum), 2):
+                score += 8
+        if info.get("interval"):
+            score += 5
+        if re.search(
+            r"\b(?:salary|compensation|pay(?: range)?|hourly|annual|per hour|per year|a year|an hour)\b",
+            text,
+            flags=re.IGNORECASE,
+        ):
+            score += 4
+        if text.count("$") >= 2:
+            score += 3
+        if re.search(r"\b\d+(?:\.\d+)?\s*(?:-|to|and|through)\s*\d+(?:\.\d+)?\s+years?\b", text, flags=re.IGNORECASE):
+            score -= 12
+        return score, len(text)
