@@ -564,6 +564,14 @@ function getIndeedNextPageUrl(root, pageUrl) {
   if (anchor) {
     return absoluteUrlFor(anchor.getAttribute('href') || anchor.href || '', pageUrl);
   }
+  const currentStart = parseNumericQueryParam(pageUrl, 'start', 0);
+  const candidate = findNextPaginationHref(root, pageUrl, (url) => {
+    const start = parseNumericQueryParam(url, 'start', -1);
+    return start > currentStart;
+  });
+  if (candidate) {
+    return candidate;
+  }
   return '';
 }
 
@@ -577,7 +585,21 @@ function getClearanceJobsNextPageUrl(root, pageUrl) {
   if (anchor) {
     return absoluteUrlFor(anchor.getAttribute('href') || anchor.href || '', pageUrl);
   }
-  return '';
+  const currentPage = parseNumericQueryParam(pageUrl, 'page', 1);
+  const candidate = findNextPaginationHref(root, pageUrl, (url) => {
+    const page = parseNumericQueryParam(url, 'page', -1);
+    return page > currentPage;
+  });
+  if (candidate) {
+    return candidate;
+  }
+  try {
+    const url = new URL(pageUrl, location.href);
+    url.searchParams.set('page', String(Math.max(currentPage, 1) + 1));
+    return url.toString();
+  } catch (_error) {
+    return '';
+  }
 }
 
 function normalizeCapturePageCount(value) {
@@ -586,6 +608,32 @@ function normalizeCapturePageCount(value) {
     return 1;
   }
   return Math.max(1, Math.min(parsed, 5));
+}
+
+function findNextPaginationHref(root, pageUrl, predicate) {
+  const anchors = Array.from(root.querySelectorAll('a[href]'));
+  for (const anchor of anchors) {
+    const href = absoluteUrlFor(anchor.getAttribute('href') || anchor.href || '', pageUrl);
+    if (!href) {
+      continue;
+    }
+    if (predicate && !predicate(href, anchor)) {
+      continue;
+    }
+    return href;
+  }
+  return '';
+}
+
+function parseNumericQueryParam(url, key, fallbackValue) {
+  try {
+    const parsed = new URL(url, location.href);
+    const rawValue = parsed.searchParams.get(key);
+    const numeric = Number.parseInt(String(rawValue || ''), 10);
+    return Number.isFinite(numeric) ? numeric : fallbackValue;
+  } catch (_error) {
+    return fallbackValue;
+  }
 }
 
 function normalizeUrlKey(url) {

@@ -119,7 +119,7 @@ async function testConnection() {
 async function captureVisibleJobs() {
   setBusy(true);
   try {
-    setStatus('Capturing visible jobs from the current page.\nWalking visible result details when available...');
+    setStatus('Capturing visible jobs from the current page.\nWalking visible result details and following supported next pages when available...');
     const config = await saveConfig();
     if (!config.serverUrl) {
       throw new Error('Enter the JobMatch server URL first.');
@@ -161,7 +161,7 @@ async function captureVisibleJobs() {
     setStatus(
       [
         `Imported into ${payload.source_name}.`,
-        `${config.pageCount} page(s) requested`,
+        `${capture.payload?.page?.captured_page_count || 1} page(s) captured`,
         `${payload.jobs_imported} job(s) parsed`,
         `${payload.jobs_created} new, ${payload.jobs_updated} updated, ${payload.jobs_unchanged} unchanged`,
       ].join('\n')
