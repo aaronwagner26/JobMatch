@@ -1,6 +1,7 @@
 const DETAIL_CAPTURE_LIMIT = 24;
-const DETAIL_CAPTURE_TIMEOUT_MS = 5000;
-const DETAIL_CAPTURE_POLL_MS = 175;
+const DETAIL_CAPTURE_TIMEOUT_MS = 1600;
+const DETAIL_CAPTURE_POLL_MS = 140;
+const MAX_CONSECUTIVE_DETAIL_SKIPS = 3;
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type !== 'jobmatch_capture_page') {
@@ -371,21 +372,31 @@ function uniqueJobs(jobs) {
 
 async function captureVisibleResultDetails(cards, options) {
   const detailMap = new Map();
+  let consecutiveSkips = 0;
   for (const card of cards.slice(0, DETAIL_CAPTURE_LIMIT)) {
     const rawId = normalizeText(options.getRawId(card) || '');
     if (!rawId || detailMap.has(rawId)) {
-      continue;
+        continue;
     }
     if (typeof options.shouldSkipDetailWalk === 'function' && options.shouldSkipDetailWalk(card, rawId)) {
+      consecutiveSkips += 1;
+      if (consecutiveSkips >= MAX_CONSECUTIVE_DETAIL_SKIPS) {
+        break;
+      }
       continue;
     }
     const currentDetail = options.captureDetail('', { useHint: false });
     if (currentDetail?.title && normalizeText(currentDetail.raw_id) === rawId) {
       detailMap.set(rawId, currentDetail);
+      consecutiveSkips = 0;
       continue;
     }
     const clickTarget = options.getClickTarget(card);
     if (!clickTarget) {
+      consecutiveSkips += 1;
+      if (consecutiveSkips >= MAX_CONSECUTIVE_DETAIL_SKIPS) {
+        break;
+      }
       continue;
     }
     safeScrollIntoView(card);
@@ -394,6 +405,12 @@ async function captureVisibleResultDetails(cards, options) {
     const detail = await waitForDetailChange(rawId, previousSignature, options.captureDetail);
     if (detail?.title) {
       detailMap.set(rawId, detail);
+      consecutiveSkips = 0;
+    } else {
+      consecutiveSkips += 1;
+      if (consecutiveSkips >= MAX_CONSECUTIVE_DETAIL_SKIPS) {
+        break;
+      }
     }
   }
   return detailMap;
@@ -473,7 +490,7 @@ function looksLikeGroupedOpeningsCard(node) {
   if (!value) {
     return false;
   }
-  return /\bmultiple openings\b|\bmultiple jobs\b|\bhiring multiple\b|\bseveral openings\b/.test(value);
+  return /\bmultiple openings\b|\bmultiple jobs\b|\bhiring multiple\b|\bseveral openings\b|\bsee all\b/.test(value);
 }
 
 function siteNameFromHost(host) {
