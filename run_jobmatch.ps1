@@ -17,14 +17,8 @@ function Test-Python312Command {
     $stderr = [System.IO.Path]::GetTempFileName()
 
     try {
-        $process = Start-Process -FilePath "py" `
-            -ArgumentList (@("-3.12") + $Arguments) `
-            -NoNewWindow `
-            -PassThru `
-            -Wait `
-            -RedirectStandardOutput $stdout `
-            -RedirectStandardError $stderr
-        return $process.ExitCode -eq 0
+        & py -3.12 @Arguments 1> $stdout 2> $stderr
+        return $LASTEXITCODE -eq 0
     }
     finally {
         Remove-Item $stdout, $stderr -ErrorAction SilentlyContinue
@@ -32,26 +26,7 @@ function Test-Python312Command {
 }
 
 function Test-JobMatchDependencies {
-    $probe = @"
-import importlib.util
-import sys
-
-modules = [
-    'bs4',
-    'httpx',
-    'nicegui',
-    'playwright',
-    'fitz',
-    'docx',
-    'dateutil',
-    'sklearn',
-    'sentence_transformers',
-    'sqlalchemy',
-]
-
-missing = [name for name in modules if importlib.util.find_spec(name) is None]
-sys.exit(0 if not missing else 1)
-"@
+    $probe = "import importlib.util, sys; modules=['bs4','httpx','nicegui','playwright','fitz','docx','dateutil','sklearn','sentence_transformers','sqlalchemy']; missing=[name for name in modules if importlib.util.find_spec(name) is None]; sys.exit(0 if not missing else 1)"
 
     return Test-Python312Command -Arguments @("-c", $probe)
 }
@@ -93,23 +68,87 @@ function Stop-JobMatchPythonProcesses {
     Start-Sleep -Milliseconds 750
 }
 
+function Get-PortListeners {
+    param(
+        [Parameter(Mandatory = $true)]
+        [int]$TargetPort
+    )
+
+    return @(Get-NetTCPConnection -LocalPort $TargetPort -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.State -eq "Listen" -and
+            $_.OwningProcess -gt 0
+        })
+}
+
+function Get-ProcessCommandLine {
+    param(
+        [Parameter(Mandatory = $true)]
+        [int]$ProcessId
+    )
+
+    $process = Get-CimInstance Win32_Process -Filter "ProcessId = $ProcessId" -ErrorAction SilentlyContinue
+    if ($process) {
+        return $process.CommandLine
+    }
+    return $null
+}
+
+function Stop-JobMatchPortOwners {
+    param(
+        [Parameter(Mandatory = $true)]
+        [int]$TargetPort
+    )
+
+    $listeners = @(Get-PortListeners -TargetPort $TargetPort)
+    if (-not $listeners) {
+        return
+    }
+
+    $owners = $listeners | Select-Object -ExpandProperty OwningProcess -Unique
+    foreach ($owner in $owners) {
+        $commandLine = Get-ProcessCommandLine -ProcessId $owner
+        if (
+            $commandLine -like "*-m app.ui.main*" -or
+            $commandLine -like "*app\ui\main.py*" -or
+            $commandLine -like "*app/ui/main.py*"
+        ) {
+            Write-Host "Stopping existing JobMatch listener $owner on port $TargetPort..."
+            Stop-Process -Id $owner -Force -ErrorAction SilentlyContinue
+        }
+    }
+
+    Start-Sleep -Milliseconds 750
+}
+
 function Assert-PortAvailable {
     param(
         [Parameter(Mandatory = $true)]
         [int]$TargetPort
     )
 
-    $connections = @(Get-NetTCPConnection -LocalPort $TargetPort -ErrorAction SilentlyContinue)
-    if (-not $connections) {
+    $listeners = @(Get-PortListeners -TargetPort $TargetPort)
+    if (-not $listeners) {
         return
     }
 
-    $owners = $connections | Select-Object -ExpandProperty OwningProcess -Unique
+    $owners = $listeners | Select-Object -ExpandProperty OwningProcess -Unique
     if (-not $owners) {
         return
     }
 
-    $ownerText = ($owners | ForEach-Object { "PID $_" }) -join ", "
+    $ownerText = (
+        $owners |
+        ForEach-Object {
+            $process = Get-Process -Id $_ -ErrorAction SilentlyContinue
+            if ($process) {
+                "$($process.ProcessName) (PID $_)"
+            }
+            else {
+                "PID $_"
+            }
+        }
+    ) -join ", "
     throw "Port $TargetPort is still in use by $ownerText. Stop that process or choose a different port."
 }
 
@@ -130,6 +169,7 @@ try {
     }
 
     Stop-JobMatchPythonProcesses
+    Stop-JobMatchPortOwners -TargetPort $Port
     Assert-PortAvailable -TargetPort $Port
 
     if ($ResolvedBindHost -eq "127.0.0.1") {
