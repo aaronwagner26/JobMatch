@@ -11,9 +11,15 @@ Load this folder as an unpacked Chrome or Edge extension.
 5. Open the JobMatch popup and paste:
    - the same JobMatch server URL you already use in the browser
    - the browser capture token from JobMatch Settings
-6. Open a jobs page, then click `Capture visible jobs`
+6. Choose how many result pages to capture in the popup
+7. Open a jobs page, then click `Capture visible jobs`
 
 On supported search pages, the extension now clicks through the visible result list and captures each visible detail pane before sending the batch to JobMatch. That is slower than a shallow list scrape, but it gives much better salary and requirement text.
+
+When you request more than one page, the extension follows supported next-page links and appends those jobs into the same import batch. The current pass supports paginated search capture on:
+
+- Indeed
+- ClearanceJobs
 
 ## Supported first-pass page types
 

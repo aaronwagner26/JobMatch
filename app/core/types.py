@@ -84,6 +84,10 @@ class NormalizedJob:
     first_seen_at: datetime | None = None
     last_seen_at: datetime | None = None
     last_updated_at: datetime | None = None
+    application_status: str = "not_applied"
+    application_confirmation_needed: bool = False
+    application_last_opened_at: datetime | None = None
+    application_status_updated_at: datetime | None = None
 
 
 @dataclass(slots=True)
@@ -93,6 +97,7 @@ class FilterCriteria:
     clearance_terms: list[str] = field(default_factory=list)
     job_type: str = "any"
     source_ids: list[int] = field(default_factory=list)
+    application_state: str = "all"
 
 
 @dataclass(slots=True)

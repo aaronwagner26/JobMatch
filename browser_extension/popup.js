@@ -1,8 +1,9 @@
 const DEFAULT_SERVER_URL = '';
-const STORAGE_KEYS = ['jobmatchServerUrl', 'jobmatchToken'];
+const STORAGE_KEYS = ['jobmatchServerUrl', 'jobmatchToken', 'jobmatchPageCount'];
 
 const serverUrlInput = document.querySelector('#serverUrl');
 const tokenInput = document.querySelector('#token');
+const pageCountInput = document.querySelector('#pageCount');
 const testButton = document.querySelector('#testButton');
 const captureButton = document.querySelector('#captureButton');
 const fillFormButton = document.querySelector('#fillFormButton');
@@ -15,6 +16,7 @@ async function init() {
   const stored = await loadConfig();
   serverUrlInput.value = stored.jobmatchServerUrl || DEFAULT_SERVER_URL;
   tokenInput.value = stored.jobmatchToken || '';
+  pageCountInput.value = String(normalizePageCount(stored.jobmatchPageCount));
 
   testButton.addEventListener('click', () => void testConnection());
   captureButton.addEventListener('click', () => void captureVisibleJobs());
@@ -46,21 +48,25 @@ async function loadConfig() {
   return {
     jobmatchServerUrl: syncData.jobmatchServerUrl || localData.jobmatchServerUrl || '',
     jobmatchToken: syncData.jobmatchToken || localData.jobmatchToken || '',
+    jobmatchPageCount: syncData.jobmatchPageCount || localData.jobmatchPageCount || 1,
   };
 }
 
 async function saveConfig() {
   const serverUrl = normalizeServerUrl(serverUrlInput.value);
   const token = tokenInput.value.trim();
+  const pageCount = normalizePageCount(pageCountInput.value);
+  pageCountInput.value = String(pageCount);
   const payload = {
     jobmatchServerUrl: serverUrl,
     jobmatchToken: token,
+    jobmatchPageCount: pageCount,
   };
   await Promise.all([
     chrome.storage.sync.set(payload),
     chrome.storage.local.set(payload),
   ]);
-  return { serverUrl, token };
+  return { serverUrl, token, pageCount };
 }
 
 async function hydrateTokenFromServer(showStatus = true) {
@@ -130,7 +136,10 @@ async function captureVisibleJobs() {
     if (!tab?.id) {
       throw new Error('Could not find the active tab.');
     }
-    const capture = await chrome.tabs.sendMessage(tab.id, { type: 'jobmatch_capture_page' });
+    const capture = await chrome.tabs.sendMessage(tab.id, {
+      type: 'jobmatch_capture_page',
+      maxPages: config.pageCount,
+    });
     if (!capture?.ok) {
       throw new Error(capture?.error || 'Could not read jobs from the current page.');
     }
@@ -152,6 +161,7 @@ async function captureVisibleJobs() {
     setStatus(
       [
         `Imported into ${payload.source_name}.`,
+        `${config.pageCount} page(s) requested`,
         `${payload.jobs_imported} job(s) parsed`,
         `${payload.jobs_created} new, ${payload.jobs_updated} updated, ${payload.jobs_unchanged} unchanged`,
       ].join('\n')
@@ -269,6 +279,14 @@ function normalizeServerUrl(value) {
   } catch (_error) {
     return trimmed;
   }
+}
+
+function normalizePageCount(value) {
+  const parsed = Number.parseInt(String(value || '1'), 10);
+  if (!Number.isFinite(parsed)) {
+    return 1;
+  }
+  return Math.max(1, Math.min(parsed, 5));
 }
 
 function errorMessage(error) {

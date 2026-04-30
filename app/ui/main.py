@@ -11,11 +11,13 @@ from typing import Any
 
 from fastapi import HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import RedirectResponse
 from nicegui import app, events, ui
 
 from app.core.engine import JobMatchEngine
 from app.core.types import DiscoveredSourceCandidate, FilterCriteria, JobSourceConfig, MatchResult, NormalizedJob, ScanSummary
 from app.utils.config import (
+    APPLICATION_FILTERS,
     APP_NAME,
     DEFAULT_SOURCE_MAX_PAGES,
     DEFAULT_SOURCE_REQUEST_DELAY_MS,
@@ -110,7 +112,7 @@ ui.add_css(
     .stat-strip { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0.75rem; width: 100%; }
     .stat-block { border-top: 1px solid var(--app-border); padding-top: 0.75rem; }
     .stat-value { font-size: 1.15rem; font-weight: 700; color: var(--app-text); }
-    .toolbar-grid { display: grid; grid-template-columns: 1.3fr 0.9fr 0.9fr 1.1fr auto auto auto; gap: 0.75rem; width: 100%; align-items: end; }
+    .toolbar-grid { display: grid; grid-template-columns: 1.2fr 0.9fr 0.9fr 1.1fr 1fr auto auto auto; gap: 0.75rem; width: 100%; align-items: end; }
     .toolbar-grid .q-field, .toolbar-grid .q-select, .toolbar-grid .q-input { width: 100%; }
     .results-shell .q-table__middle { max-height: calc(100vh - 300px); }
     .results-status-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.75rem; }
@@ -149,10 +151,23 @@ ui.add_css(
     .score-pill { display: inline-flex; min-width: 3.7rem; justify-content: center; padding: 0.2rem 0.45rem; border-radius: 999px; background: rgba(15, 118, 110, 0.12); color: var(--app-accent); font-size: 0.78rem; }
     .salary-pill { display: inline-flex; white-space: nowrap; padding: 0.2rem 0.45rem; border-radius: 999px; background: rgba(124, 58, 237, 0.12); color: #6d28d9; font-size: 0.76rem; }
     body.body--dark .salary-pill { color: #c4b5fd; }
+    .application-banner { border: 1px solid rgba(217, 119, 6, 0.28); background: rgba(217, 119, 6, 0.08); }
+    .application-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.9rem; padding: 0.75rem 0; border-top: 1px solid var(--app-border); }
+    .application-row:first-of-type { border-top: 0; padding-top: 0.25rem; }
+    .application-actions { display: flex; flex-wrap: wrap; gap: 0.55rem; align-items: center; }
+    .application-chip { display: inline-flex; align-items: center; border-radius: 999px; padding: 0.18rem 0.55rem; font-size: 0.72rem; font-weight: 700; letter-spacing: 0.03em; }
+    .application-chip-pending { background: rgba(217, 119, 6, 0.16); color: #b45309; }
+    .application-chip-applied { background: rgba(15, 118, 110, 0.16); color: #0f766e; }
+    .application-chip-not-applied { background: rgba(71, 85, 105, 0.14); color: var(--app-muted); }
+    .application-chip-not-interested { background: rgba(148, 163, 184, 0.18); color: #475569; }
+    body.body--dark .application-chip-pending { color: #fdba74; }
+    body.body--dark .application-chip-applied { color: #5eead4; }
+    body.body--dark .application-chip-not-interested { color: #cbd5e1; }
+    .application-subcopy { color: var(--app-muted); font-size: 0.85rem; }
     .job-primary { font-weight: 600; color: var(--app-text); }
     .job-secondary { color: var(--app-muted); font-size: 0.88rem; }
     .match-col-title .job-primary { line-height: 1.35; word-break: break-word; }
-    .detail-grid { display: grid; grid-template-columns: 1.2fr 0.8fr 1fr; gap: 1rem; }
+    .detail-grid { display: grid; grid-template-columns: 1.05fr 0.9fr 0.95fr 1fr; gap: 1rem; }
     .detail-block { padding-top: 0.2rem; }
     .detail-title { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--app-muted); margin-bottom: 0.45rem; }
     .detail-copy { color: var(--app-text); line-height: 1.5; white-space: pre-line; }
@@ -236,6 +251,45 @@ async def browser_capture_import(request: Request) -> dict[str, Any]:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+@app.post("/api/jobs/{job_id}/mark-opened")
+async def mark_job_opened(job_id: int) -> dict[str, Any]:
+    try:
+        job = await asyncio.to_thread(ENGINE.mark_job_opened_for_apply, job_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {
+        "ok": True,
+        "job_id": job.id,
+        "application_status": job.application_status,
+        "application_confirmation_needed": job.application_confirmation_needed,
+    }
+
+
+@app.post("/api/jobs/{job_id}/application-state")
+async def set_job_application_state(job_id: int, request: Request) -> dict[str, Any]:
+    payload = await request.json()
+    status = str(payload.get("status") or "")
+    try:
+        job = await asyncio.to_thread(ENGINE.set_job_application_state, job_id, status)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {
+        "ok": True,
+        "job_id": job.id,
+        "application_status": job.application_status,
+        "application_confirmation_needed": job.application_confirmation_needed,
+    }
+
+
+@app.get("/jobs/open/{job_id}")
+async def redirect_to_job(job_id: int) -> RedirectResponse:
+    try:
+        job = await asyncio.to_thread(ENGINE.mark_job_opened_for_apply, job_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return RedirectResponse(job.url, status_code=307)
+
+
 @dataclass(slots=True)
 class UIState:
     current_view: str = "dashboard"
@@ -243,6 +297,7 @@ class UIState:
     location_query: str = ""
     remote_mode: str = "any"
     job_type: str = "any"
+    application_state: str = "all"
     clearance_terms: list[str] = field(default_factory=list)
     matches: list[MatchResult] = field(default_factory=list)
     match_error: str = ""
@@ -456,6 +511,28 @@ class JobMatchUI:
         if self.state.current_view == "dashboard":
             self.render_current_view()
 
+    def set_job_application_state(self, job_id: int, status: str) -> None:
+        try:
+            updated = self.engine.set_job_application_state(job_id, status)
+            self._patch_local_match_application_state(updated)
+            label = self._application_chip(updated)["label"].lower()
+            self._notify(f"Marked job as {label}.", type="positive")
+        except Exception as exc:
+            self._notify(f"Could not update application status: {exc}", type="negative")
+            return
+        if self.state.current_view == "dashboard":
+            self.render_current_view()
+
+    def _patch_local_match_application_state(self, updated_job: NormalizedJob) -> None:
+        for match in self.state.matches:
+            if match.job_id != updated_job.id:
+                continue
+            match.job.application_status = updated_job.application_status
+            match.job.application_confirmation_needed = updated_job.application_confirmation_needed
+            match.job.application_last_opened_at = updated_job.application_last_opened_at
+            match.job.application_status_updated_at = updated_job.application_status_updated_at
+            break
+
     def render_current_view(self) -> None:
         if self._client_deleted or self.content is None:
             return
@@ -481,6 +558,7 @@ class JobMatchUI:
     def render_dashboard(self) -> None:
         resume = self.engine.get_active_resume()
         cached_jobs = self.engine.list_filtered_jobs(self.current_filters(), dedupe=False)
+        pending_jobs = self.engine.list_jobs_pending_confirmation(limit=6)
         matched_ids = {match.job_id for match in self.state.matches}
         unmatched_jobs = [job for job in cached_jobs if job.id not in matched_ids]
         visible_count = (
@@ -500,6 +578,9 @@ class JobMatchUI:
                     ui.button("Export CSV", icon="download", on_click=lambda: self.handle_export("csv")).props("flat")
                     ui.button("Export JSON", icon="code", on_click=lambda: self.handle_export("json")).props("flat")
 
+            if pending_jobs:
+                self.render_application_follow_up_panel(pending_jobs)
+
             with ui.element("section").classes("panel panel-tight"):
                 with ui.element("div").classes("toolbar-grid"):
                     ui.input("Location", value=self.state.location_query, on_change=lambda e: setattr(self.state, "location_query", e.value)).props("outlined dense")
@@ -515,6 +596,12 @@ class JobMatchUI:
                         new_value_mode="add-unique",
                         on_change=lambda e: setattr(self.state, "clearance_terms", list(e.value or [])),
                     ).props("outlined dense use-chips")
+                    ui.select(
+                        APPLICATION_FILTERS,
+                        value=self.state.application_state,
+                        label="Application",
+                        on_change=lambda e: setattr(self.state, "application_state", str(e.value or "all")),
+                    ).props("outlined dense")
                     ui.button("Apply", icon="filter_alt", on_click=lambda: asyncio.create_task(self.refresh_matches())).props("unelevated")
                     ui.button("Clear", icon="restart_alt", on_click=self.clear_filters).props("flat")
                     ui.label(f"{visible_count} shown").classes("self-center muted-copy text-right")
@@ -548,6 +635,34 @@ class JobMatchUI:
                         self._render_results_table(unmatched_jobs, ranked=False, secondary_label="Not in ranked results.")
                     else:
                         self._render_results_table(cached_jobs, ranked=False, secondary_label="Cached job.")
+
+    def render_application_follow_up_panel(self, jobs: list[NormalizedJob]) -> None:
+        with ui.element("section").classes("panel application-banner"):
+            ui.label("Confirm what happened after you opened these postings.").classes("text-lg font-semibold")
+            ui.label(
+                "This does not block the app. It keeps applied, not-yet, and no-longer-interested jobs visibly separated."
+            ).classes("application-subcopy mt-1")
+            for job in jobs:
+                with ui.element("div").classes("application-row"):
+                    with ui.column().classes("gap-1"):
+                        chip = self._application_chip(job)
+                        with ui.row().classes("items-center gap-2"):
+                            ui.label(chip["label"]).classes(chip["class"])
+                            ui.label(job.title).classes("job-primary")
+                        ui.label(f"{job.company} • {job.location or 'Unspecified'}").classes("application-subcopy")
+                    with ui.element("div").classes("application-actions"):
+                        ui.button(
+                            "Applied",
+                            on_click=lambda _, job_id=job.id: self.set_job_application_state(job_id or 0, "applied"),
+                        ).props("unelevated dense color=positive no-caps")
+                        ui.button(
+                            "Not yet",
+                            on_click=lambda _, job_id=job.id: self.set_job_application_state(job_id or 0, "not_applied"),
+                        ).props("flat dense no-caps")
+                        ui.button(
+                            "No longer interested",
+                            on_click=lambda _, job_id=job.id: self.set_job_application_state(job_id or 0, "not_interested"),
+                        ).props("flat dense no-caps")
 
     def render_scans(self) -> None:
         sources = self.engine.list_sources()
@@ -1536,6 +1651,7 @@ class JobMatchUI:
         self.state.location_query = ""
         self.state.remote_mode = "any"
         self.state.job_type = "any"
+        self.state.application_state = "all"
         self.state.clearance_terms = []
         asyncio.create_task(self.refresh_matches())
 
@@ -1545,6 +1661,7 @@ class JobMatchUI:
             remote_mode=self.state.remote_mode,
             job_type=self.state.job_type,
             clearance_terms=self.state.clearance_terms,
+            application_state=self.state.application_state,
         )
 
     async def handle_manual_source_import(self) -> None:
@@ -1944,6 +2061,9 @@ class JobMatchUI:
               </q-td>
               __SCORE_CELL__
               <q-td key="title" :props="props" class="match-col-title">
+                <div class="chip-row" style="margin-bottom: 0.35rem;">
+                  <span :class="props.row.application_class">{{ props.row.application_label }}</span>
+                </div>
                 <div class="job-primary">{{ props.row.title }}</div>
                 <div class="job-secondary">{{ props.row.matched_summary }}</div>
               </q-td>
@@ -1965,8 +2085,7 @@ class JobMatchUI:
                   flat
                   round
                   icon="open_in_new"
-                  :href="props.row.url"
-                  target="_blank"
+                  @click="fetch(props.row.mark_opened_url, {method: 'POST'}).catch(() => null).finally(() => { window.open(props.row.url, '_blank', 'noopener'); setTimeout(() => window.location.reload(), 150); })"
                 />
               </q-td>
             </q-tr>
@@ -1984,6 +2103,37 @@ class JobMatchUI:
                     <div class="detail-copy">{{ props.row.missing_skills }}</div>
                   </div>
                   <div class="detail-block">
+                    <div class="detail-title">Application</div>
+                    <div class="chip-row">
+                      <span :class="props.row.application_class">{{ props.row.application_label }}</span>
+                    </div>
+                    <div class="detail-copy" style="margin-top: 0.45rem;">{{ props.row.application_help }}</div>
+                    <div class="chip-row" style="margin-top: 0.8rem;">
+                      <q-btn
+                        color="positive"
+                        dense
+                        no-caps
+                        unelevated
+                        label="Applied"
+                        @click="fetch(props.row.application_state_url, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({status: 'applied'})}).finally(() => window.location.reload())"
+                      />
+                      <q-btn
+                        dense
+                        flat
+                        no-caps
+                        label="Not yet"
+                        @click="fetch(props.row.application_state_url, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({status: 'not_applied'})}).finally(() => window.location.reload())"
+                      />
+                      <q-btn
+                        dense
+                        flat
+                        no-caps
+                        label="No longer interested"
+                        @click="fetch(props.row.application_state_url, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({status: 'not_interested'})}).finally(() => window.location.reload())"
+                      />
+                    </div>
+                  </div>
+                  <div class="detail-block">
                     <div class="detail-title">Posting Details</div>
                     <div class="detail-copy">Source: {{ props.row.source_name }}</div>
                     <div class="detail-copy">Type: {{ props.row.job_type || 'unspecified' }}</div>
@@ -1997,8 +2147,7 @@ class JobMatchUI:
                         no-caps
                         icon-right="open_in_new"
                         label="Open posting"
-                        :href="props.row.url"
-                        target="_blank"
+                        @click="fetch(props.row.mark_opened_url, {method: 'POST'}).catch(() => null).finally(() => { window.open(props.row.url, '_blank', 'noopener'); setTimeout(() => window.location.reload(), 150); })"
                       />
                     </div>
                   </div>
@@ -2023,6 +2172,7 @@ class JobMatchUI:
         reasons_text = "\n".join(match.reasons)
         matched_summary = f"{len(match.matched_skills)} skill(s) | {match.embedding_score * 100:.0f}% semantic"
         type_display, salary_display = JobMatchUI._display_type_and_salary(match.job.job_type, match.job.salary_text, match.job.employment_text)
+        application = JobMatchUI._application_chip(match.job)
         return {
             "id": match.job_id,
             "score_value": round(match.score, 4),
@@ -2043,12 +2193,19 @@ class JobMatchUI:
             "url": match.job.url,
             "source_name": match.job.source_name,
             "description": clipped_excerpt(clean_job_text(match.job.description), 1200),
+            "application_status": match.job.application_status,
+            "application_label": application["label"],
+            "application_class": application["class"],
+            "application_help": application["help"],
+            "mark_opened_url": f"/api/jobs/{match.job_id}/mark-opened",
+            "application_state_url": f"/api/jobs/{match.job_id}/application-state",
         }
 
     @staticmethod
     def _job_row(job: NormalizedJob, secondary_label: str) -> dict[str, Any]:
         clearance = ", ".join(job.clearance_terms) if job.clearance_terms else "None"
         type_display, salary_display = JobMatchUI._display_type_and_salary(job.job_type, job.salary_text, job.employment_text)
+        application = JobMatchUI._application_chip(job)
         return {
             "id": job.id,
             "title": job.title,
@@ -2067,6 +2224,39 @@ class JobMatchUI:
             "url": job.url,
             "source_name": job.source_name,
             "description": clipped_excerpt(clean_job_text(job.description), 1200),
+            "application_status": job.application_status,
+            "application_label": application["label"],
+            "application_class": application["class"],
+            "application_help": application["help"],
+            "mark_opened_url": f"/api/jobs/{job.id}/mark-opened" if job.id is not None else "",
+            "application_state_url": f"/api/jobs/{job.id}/application-state" if job.id is not None else "",
+        }
+
+    @staticmethod
+    def _application_chip(job: NormalizedJob) -> dict[str, str]:
+        status = normalize_whitespace(getattr(job, "application_status", "not_applied") or "not_applied").replace("-", "_")
+        if getattr(job, "application_confirmation_needed", False) or status == "pending":
+            return {
+                "label": "Confirm application",
+                "class": "application-chip application-chip-pending",
+                "help": "You opened this posting. Confirm whether you applied, want to do it later, or are no longer interested.",
+            }
+        if status == "applied":
+            return {
+                "label": "Applied",
+                "class": "application-chip application-chip-applied",
+                "help": "Marked as applied.",
+            }
+        if status == "not_interested":
+            return {
+                "label": "No longer interested",
+                "class": "application-chip application-chip-not-interested",
+                "help": "Marked as no longer interested.",
+            }
+        return {
+            "label": "Not applied yet",
+            "class": "application-chip application-chip-not-applied",
+            "help": "Not marked as applied yet.",
         }
 
     @staticmethod

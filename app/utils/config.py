@@ -46,6 +46,13 @@ JOB_TYPES = [
     "internship",
     "apprenticeship",
 ]
+APPLICATION_FILTERS = {
+    "all": "All jobs",
+    "not_applied_yet": "Not applied yet",
+    "pending": "Needs confirmation",
+    "applied": "Applied",
+    "not_interested": "No longer interested",
+}
 THEME_MODES = ["auto", "light", "dark"]
 
 DEFAULT_SETTINGS = {

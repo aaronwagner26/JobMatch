@@ -287,6 +287,58 @@ class Storage:
                 }
             return index
 
+    def get_job(self, job_id: int) -> NormalizedJob | None:
+        with self.session() as session:
+            row = session.execute(
+                select(JobRecord, SourceRecord)
+                .join(SourceRecord, JobRecord.source_id == SourceRecord.id)
+                .where(JobRecord.id == job_id)
+            ).first()
+            if row is None:
+                return None
+            job_record, source_record = row
+            return self._job_from_record(job_record, source_record)
+
+    def list_jobs_pending_confirmation(self, *, limit: int = 6, active_only: bool = True) -> list[NormalizedJob]:
+        with self.session() as session:
+            query = (
+                select(JobRecord, SourceRecord)
+                .join(SourceRecord, JobRecord.source_id == SourceRecord.id)
+                .where(JobRecord.application_confirmation_needed.is_(True))
+            )
+            if active_only:
+                query = query.where(JobRecord.active.is_(True))
+            rows = session.execute(
+                query.order_by(JobRecord.application_last_opened_at.desc(), JobRecord.id.desc()).limit(limit)
+            ).all()
+            return [self._job_from_record(job_record, source_record) for job_record, source_record in rows]
+
+    def update_job_application_state(
+        self,
+        job_id: int,
+        *,
+        status: str | None = None,
+        confirmation_needed: bool | None = None,
+        opened_at: datetime | None = None,
+    ) -> NormalizedJob | None:
+        with self.session() as session:
+            record = session.get(JobRecord, job_id)
+            if record is None:
+                return None
+            now = datetime.now(UTC)
+            if status is not None:
+                record.application_status = status
+                record.application_status_updated_at = now
+            if confirmation_needed is not None:
+                record.application_confirmation_needed = confirmation_needed
+            if opened_at is not None:
+                record.application_last_opened_at = opened_at
+            session.flush()
+            source = session.get(SourceRecord, record.source_id)
+            if source is None:
+                return None
+            return self._job_from_record(record, source)
+
     def upsert_jobs(self, source: JobSourceConfig, jobs: list[NormalizedJob]) -> tuple[int, int, int, int]:
         created = 0
         updated = 0
@@ -532,6 +584,14 @@ class Storage:
                 statements.append("ALTER TABLE jobs ADD COLUMN salary_interval VARCHAR(16)")
             if "salary_text" not in job_columns:
                 statements.append("ALTER TABLE jobs ADD COLUMN salary_text VARCHAR(120)")
+            if "application_status" not in job_columns:
+                statements.append("ALTER TABLE jobs ADD COLUMN application_status VARCHAR(32) DEFAULT 'not_applied'")
+            if "application_confirmation_needed" not in job_columns:
+                statements.append("ALTER TABLE jobs ADD COLUMN application_confirmation_needed BOOLEAN DEFAULT 0")
+            if "application_last_opened_at" not in job_columns:
+                statements.append("ALTER TABLE jobs ADD COLUMN application_last_opened_at DATETIME")
+            if "application_status_updated_at" not in job_columns:
+                statements.append("ALTER TABLE jobs ADD COLUMN application_status_updated_at DATETIME")
         if not statements:
             return
         with self.engine.begin() as connection:
@@ -620,6 +680,10 @@ class Storage:
             first_seen_at=record.first_seen_at,
             last_seen_at=record.last_seen_at,
             last_updated_at=record.last_updated_at,
+            application_status=getattr(record, "application_status", None) or "not_applied",
+            application_confirmation_needed=bool(getattr(record, "application_confirmation_needed", False)),
+            application_last_opened_at=getattr(record, "application_last_opened_at", None),
+            application_status_updated_at=getattr(record, "application_status_updated_at", None),
         )
 
     @staticmethod

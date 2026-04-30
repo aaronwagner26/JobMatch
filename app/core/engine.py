@@ -153,6 +153,42 @@ class JobMatchEngine:
             raise RuntimeError("Stop the active scan before clearing cached results.")
         self.storage.clear_scan_results()
 
+    def get_job(self, job_id: int) -> NormalizedJob | None:
+        return self.storage.get_job(job_id)
+
+    def list_jobs_pending_confirmation(self, *, limit: int = 6) -> list[NormalizedJob]:
+        return self.storage.list_jobs_pending_confirmation(limit=limit, active_only=True)
+
+    def mark_job_opened_for_apply(self, job_id: int) -> NormalizedJob:
+        job = self.storage.get_job(job_id)
+        if job is None:
+            raise ValueError("Job not found.")
+        if job.application_status in {"applied", "not_interested"}:
+            return job
+        updated = self.storage.update_job_application_state(
+            job_id,
+            status="pending",
+            confirmation_needed=True,
+            opened_at=datetime.now(UTC),
+        )
+        if updated is None:
+            raise ValueError("Job not found.")
+        return updated
+
+    def set_job_application_state(self, job_id: int, status: str) -> NormalizedJob:
+        normalized = normalize_whitespace(status).replace("-", "_").casefold()
+        if normalized not in {"not_applied", "applied", "not_interested", "pending"}:
+            raise ValueError("Unsupported application state.")
+        updated = self.storage.update_job_application_state(
+            job_id,
+            status=normalized,
+            confirmation_needed=normalized == "pending",
+            opened_at=datetime.now(UTC) if normalized == "pending" else None,
+        )
+        if updated is None:
+            raise ValueError("Job not found.")
+        return updated
+
     def cancel_scan(self) -> bool:
         if not self._scan_lock.locked():
             return False
@@ -458,6 +494,7 @@ class JobMatchEngine:
                         "remote_mode",
                         "job_type",
                         "salary_text",
+                        "application_status",
                         "clearance_terms",
                         "matched_skills",
                         "missing_skills",
@@ -478,6 +515,7 @@ class JobMatchEngine:
                             "remote_mode": match.job.remote_mode,
                             "job_type": match.job.job_type or "",
                             "salary_text": match.job.salary_text or "",
+                            "application_status": match.job.application_status or "not_applied",
                             "clearance_terms": ", ".join(match.job.clearance_terms),
                             "matched_skills": ", ".join(match.matched_skills),
                             "missing_skills": ", ".join(match.missing_skills),
@@ -881,7 +919,15 @@ class JobMatchEngine:
     @staticmethod
     def _job_sort_key(job) -> tuple:
         recency = job.last_seen_at or job.last_updated_at or job.first_seen_at or datetime.min.replace(tzinfo=UTC)
+        application_priority = 0
+        if getattr(job, "application_confirmation_needed", False):
+            application_priority = 3
+        elif getattr(job, "application_status", "not_applied") == "applied":
+            application_priority = 2
+        elif getattr(job, "application_status", "not_applied") == "not_interested":
+            application_priority = 1
         return (
+            application_priority,
             len(job.description or ""),
             len(job.required_skills or []),
             len(job.skills or []),
@@ -913,6 +959,8 @@ class JobMatchEngine:
                 "salary_currency": match.job.salary_currency,
                 "salary_interval": match.job.salary_interval,
                 "salary_text": match.job.salary_text,
+                "application_status": match.job.application_status,
+                "application_confirmation_needed": match.job.application_confirmation_needed,
                 "clearance_terms": match.job.clearance_terms,
                 "url": match.job.url,
                 "posted_at": match.job.posted_at.isoformat() if match.job.posted_at else None,

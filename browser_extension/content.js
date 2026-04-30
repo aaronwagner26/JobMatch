@@ -7,7 +7,7 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type === 'jobmatch_capture_page') {
     void (async () => {
       try {
-        sendResponse({ ok: true, payload: await captureCurrentPage() });
+        sendResponse({ ok: true, payload: await captureCurrentPage({ maxPages: message.maxPages }) });
       } catch (error) {
         sendResponse({
           ok: false,
@@ -36,16 +36,17 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   return undefined;
 });
 
-async function captureCurrentPage() {
+async function captureCurrentPage(options = {}) {
+  const maxPages = normalizeCapturePageCount(options.maxPages);
   const host = location.hostname.toLowerCase();
   if (host.endsWith('linkedin.com') && location.pathname.toLowerCase().includes('/company/') && location.pathname.toLowerCase().includes('/jobs')) {
     return captureLinkedInCompanyPage();
   }
   if (host.includes('indeed.')) {
-    return captureIndeedPage();
+    return captureIndeedPage({ maxPages });
   }
   if (host.includes('clearancejobs.com')) {
-    return captureClearanceJobsPage();
+    return captureClearanceJobsPage({ maxPages });
   }
   return captureGenericPage();
 }
@@ -137,7 +138,7 @@ function captureLinkedInSelectedDetail(rawIdHint = '', options = {}) {
   };
 }
 
-async function captureIndeedPage() {
+async function captureIndeedPage(options = {}) {
   const cards = uniqueNodes(
     Array.from(document.querySelectorAll('[data-jk], [data-testid="slider_item"], a[href*="/viewjob"]'))
       .map((node) => node.tagName === 'A' ? node.closest('[data-jk], [data-testid="slider_item"], article, li, div') || node : node)
@@ -190,10 +191,15 @@ async function captureIndeedPage() {
     jobs.push(detail);
   }
   const queryLabel = firstText(document, ['h1', '[data-testid="jobsearch-HeroLabel"]']) || document.title;
-  return buildCapturePayload('indeed_search', 'Indeed', queryLabel, jobs);
+  const payload = buildCapturePayload('indeed_search', 'Indeed', queryLabel, jobs);
+  return appendPaginatedJobs(payload, {
+    maxPages: options.maxPages,
+    nextPageUrl: getIndeedNextPageUrl(document, location.href),
+    parsePage: parseIndeedResultsDocument,
+  });
 }
 
-async function captureClearanceJobsPage() {
+async function captureClearanceJobsPage(options = {}) {
   const cards = uniqueNodes(
     Array.from(document.querySelectorAll('.job-search-list-item-desktop')).filter((node) => isVisible(node))
   );
@@ -238,7 +244,12 @@ async function captureClearanceJobsPage() {
     jobs.push(detail);
   }
   const label = firstText(document, ['h1', '.job-search-title']) || document.title;
-  return buildCapturePayload('clearance_search', 'ClearanceJobs', label, jobs);
+  const payload = buildCapturePayload('clearance_search', 'ClearanceJobs', label, jobs);
+  return appendPaginatedJobs(payload, {
+    maxPages: options.maxPages,
+    nextPageUrl: getClearanceJobsNextPageUrl(document, location.href),
+    parsePage: parseClearanceJobsResultsDocument,
+  });
 }
 
 function captureClearanceJobsDetailPage() {
@@ -417,6 +428,168 @@ function buildCapturePayload(parser, site, companyOrLabel, jobs) {
 function sourceNameFor(site, companyOrLabel) {
   const label = normalizeText(companyOrLabel) || site || 'Captured Jobs';
   return `Capture: ${label}${site && !label.includes(site) ? ` (${site})` : ''}`;
+}
+
+async function appendPaginatedJobs(payload, options = {}) {
+  const maxPages = normalizeCapturePageCount(options.maxPages);
+  const parsePage = typeof options.parsePage === 'function' ? options.parsePage : null;
+  if (maxPages <= 1 || !parsePage) {
+    payload.page = { ...(payload.page || {}), captured_page_count: 1 };
+    return payload;
+  }
+  let nextPageUrl = normalizeText(options.nextPageUrl || '');
+  let pageCount = 1;
+  const visited = new Set([normalizeUrlKey(location.href)]);
+  const combined = [...(Array.isArray(payload.jobs) ? payload.jobs : [])];
+  while (pageCount < maxPages && nextPageUrl) {
+    const visitKey = normalizeUrlKey(nextPageUrl);
+    if (visited.has(visitKey)) {
+      break;
+    }
+    visited.add(visitKey);
+    const html = await fetchPaginatedHtml(nextPageUrl);
+    if (!html) {
+      break;
+    }
+    const doc = new DOMParser().parseFromString(html, 'text/html');
+    const jobs = parsePage(doc, nextPageUrl);
+    if (!jobs.length) {
+      break;
+    }
+    combined.push(...jobs);
+    pageCount += 1;
+    if (payload.parser === 'indeed_search') {
+      nextPageUrl = getIndeedNextPageUrl(doc, nextPageUrl);
+    } else if (payload.parser === 'clearance_search') {
+      nextPageUrl = getClearanceJobsNextPageUrl(doc, nextPageUrl);
+    } else {
+      nextPageUrl = '';
+    }
+  }
+  payload.jobs = uniqueJobs(combined);
+  payload.page = { ...(payload.page || {}), captured_page_count: pageCount };
+  return payload;
+}
+
+async function fetchPaginatedHtml(url) {
+  try {
+    const response = await fetch(url, { credentials: 'include' });
+    if (!response.ok) {
+      return '';
+    }
+    return await response.text();
+  } catch (_error) {
+    return '';
+  }
+}
+
+function parseIndeedResultsDocument(doc, pageUrl) {
+  const cards = uniqueNodes(
+    Array.from(doc.querySelectorAll('[data-jk], [data-testid="slider_item"], a[href*="/viewjob"]'))
+      .map((node) => node.tagName === 'A' ? node.closest('[data-jk], [data-testid="slider_item"], article, li, div') || node : node)
+      .filter(Boolean)
+  );
+  return uniqueJobs(cards.map((node) => {
+    const anchor = node.tagName === 'A' ? node : firstNode(node, ['a[href*="/viewjob"]', 'a[href*="jk="]', 'a[href*="/rc/clk"]', 'a[href*="/pagead/clk"]']);
+    const container = node.tagName === 'A' ? node.closest('[data-jk], [data-testid="slider_item"], article, li, div') || node : node;
+    if (!anchor || !container) {
+      return null;
+    }
+    const rawId = normalizeText(container?.getAttribute?.('data-jk') || anchor?.getAttribute?.('data-jk') || jobIdFromUrl(anchor?.href || ''));
+    const cardMetaTexts = indeedCardMetaTexts(container);
+    const cardSalaryText = firstSalaryText([
+      ...texts(container, ['.salary-snippet', '.estimated-salary', '[class*="salary"]', '[data-testid="attribute_snippet_testid"]']),
+      ...cardMetaTexts,
+    ]);
+    const cardEmploymentText = cardMetaTexts.filter((value) => value && value !== cardSalaryText && looksLikeEmploymentText(value)).join(' | ');
+    return {
+      raw_id: rawId || canonicalIndeedJobUrl(anchor?.href || '', rawId),
+      title: text(anchor),
+      company: firstText(container, ['.companyName', '[data-testid="company-name"]']),
+      location: firstText(container, ['.companyLocation', '[data-testid="text-location"]']),
+      summary: firstText(container, ['.job-snippet', '[data-testid="job-snippet"]']),
+      description: '',
+      salary_text: cardSalaryText || '',
+      employment_text: cardEmploymentText || '',
+      url: canonicalIndeedJobUrl(absoluteUrlFor(anchor?.href || '', pageUrl), rawId),
+      posted_at: firstText(container, ['.date', 'time']),
+    };
+  }));
+}
+
+function parseClearanceJobsResultsDocument(doc, pageUrl) {
+  const cards = uniqueNodes(Array.from(doc.querySelectorAll('.job-search-list-item-desktop')));
+  return uniqueJobs(cards.map((card) => {
+    const anchor = firstNode(card, ['a.job-search-list-item-desktop__job-name', 'a[href*="/jobs/"]']);
+    const url = absoluteUrlFor(anchor?.href || '', pageUrl);
+    if (!anchor || !url) {
+      return null;
+    }
+    const locationText = firstText(card, ['.job-search-list-item-desktop__location', '.location']);
+    const summary = firstText(card, ['.job-search-list-item-desktop__description', '.job-description', 'p']);
+    const footerTexts = clearanceCardMetaTexts(card);
+    const postedAt = footerTexts.find((value) => /^posted\b/i.test(value)) || '';
+    return {
+      raw_id: url,
+      title: text(anchor),
+      company: firstText(card, ['.job-search-list-item-desktop__company-name', '.company']),
+      location: locationText,
+      summary,
+      description: '',
+      requirements_text: joinUniqueTexts([
+        summary,
+        ...footerTexts.filter((value) => value && value !== postedAt && normalizeText(value).toLowerCase() !== normalizeText(locationText).toLowerCase()),
+      ]),
+      salary_text: firstMeaningfulSalaryText([
+        summary,
+        ...footerTexts,
+        ...texts(card, ['.salary', '.salary-range', '.compensation', '[class*="salary"]']),
+      ]),
+      employment_text: joinUniqueTexts(
+        footerTexts.filter((value) => looksLikeEmploymentText(value) && normalizeText(value).toLowerCase() !== normalizeText(locationText).toLowerCase())
+      ),
+      url,
+      posted_at: postedAt,
+    };
+  }));
+}
+
+function getIndeedNextPageUrl(root, pageUrl) {
+  const anchor = firstNode(root, [
+    'a[data-testid="pagination-page-next"]',
+    'a[aria-label^="Next"]',
+    'a[aria-label*="Next Page"]',
+    'a[rel="next"]',
+  ]);
+  if (anchor) {
+    return absoluteUrlFor(anchor.getAttribute('href') || anchor.href || '', pageUrl);
+  }
+  return '';
+}
+
+function getClearanceJobsNextPageUrl(root, pageUrl) {
+  const anchor = firstNode(root, [
+    'a[rel="next"]',
+    'a[aria-label^="Next"]',
+    '.pagination a[title="Next"]',
+    '.pagination a.next',
+  ]);
+  if (anchor) {
+    return absoluteUrlFor(anchor.getAttribute('href') || anchor.href || '', pageUrl);
+  }
+  return '';
+}
+
+function normalizeCapturePageCount(value) {
+  const parsed = Number.parseInt(String(value || '1'), 10);
+  if (!Number.isFinite(parsed)) {
+    return 1;
+  }
+  return Math.max(1, Math.min(parsed, 5));
+}
+
+function normalizeUrlKey(url) {
+  return normalizeText(url).toLowerCase();
 }
 
 function extractJsonLdJobs() {
@@ -744,8 +917,12 @@ function siteNameFromHost(host) {
 }
 
 function absoluteUrl(href) {
+  return absoluteUrlFor(href, location.href);
+}
+
+function absoluteUrlFor(href, baseUrl) {
   try {
-    return new URL(href, location.href).toString();
+    return new URL(href, baseUrl || location.href).toString();
   } catch (_error) {
     return '';
   }

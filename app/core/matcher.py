@@ -103,6 +103,20 @@ class JobMatcher:
             requested = {term.casefold() for term in filters.clearance_terms}
             if not requested.issubset(job_clearance):
                 return False
+        if filters.application_state != "all":
+            status = (job.application_status or "not_applied").casefold()
+            if filters.application_state == "not_applied_yet":
+                if status not in {"not_applied", "pending"}:
+                    return False
+            elif filters.application_state == "pending":
+                if status != "pending" or not job.application_confirmation_needed:
+                    return False
+            elif filters.application_state == "applied":
+                if status != "applied":
+                    return False
+            elif filters.application_state == "not_interested":
+                if status != "not_interested":
+                    return False
         return True
 
     @staticmethod
