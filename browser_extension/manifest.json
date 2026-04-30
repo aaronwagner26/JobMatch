@@ -3,7 +3,7 @@
   "name": "JobMatch Capture",
   "version": "0.1.0",
   "description": "Capture visible jobs from the current page and send them to JobMatch.",
-  "permissions": ["storage", "activeTab"],
+  "permissions": ["storage", "activeTab", "tabs"],
   "host_permissions": ["<all_urls>"],
   "action": {
     "default_title": "JobMatch Capture",

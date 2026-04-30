@@ -234,11 +234,6 @@ SALARY_SINGLE_PATTERNS.extend(
             r"(?P<suffix>[^.;,\n]{0,40})",
             re.IGNORECASE,
         ),
-        re.compile(
-            r"(?P<currency>\$|usd)?\s*(?P<amount>\d{1,3}(?:,\d{3})*(?:\.\d+)?(?:\s*[km])?)"
-            r"(?P<suffix>\s*(?:per|a|an|\/)\s*(?:hour|day|week|month|year|hr|wk|mo|yr)\b[^.;,\n]{0,24})",
-            re.IGNORECASE,
-        ),
     ]
 )
 SALARY_INTERVAL_PATTERNS = {
@@ -384,8 +379,9 @@ def extract_salary_info(text: str | None) -> dict[str, object]:
         has_compensation_context = bool(
             re.search(r"\b(salary|compensation|pay|rate|hourly|annual|base)\b", window, flags=re.IGNORECASE)
         )
-        has_interval = bool(_detect_salary_interval(match.group("suffix") or window))
-        if not has_currency and not has_compensation_context and not has_interval:
+        if not has_currency and not has_compensation_context:
+            continue
+        if re.search(r"\byears?(?:\s+of)?\s+experience\b", window, flags=re.IGNORECASE):
             continue
         minimum = _parse_salary_amount(match.group("min"))
         maximum = _parse_salary_amount(match.group("max"))
@@ -404,6 +400,15 @@ def extract_salary_info(text: str | None) -> dict[str, object]:
     for pattern in SALARY_SINGLE_PATTERNS:
         match = pattern.search(normalized)
         if not match:
+            continue
+        window = normalized[max(0, match.start() - 24) : min(len(normalized), match.end() + 24)]
+        has_currency = bool(match.groupdict().get("currency") or "$" in window or "usd" in window.casefold())
+        has_compensation_context = bool(
+            re.search(r"\b(salary|compensation|pay|rate|hourly|annual|base|starting at|starts at|minimum of|maximum of|up to)\b", window, flags=re.IGNORECASE)
+        )
+        if not has_currency and not has_compensation_context:
+            continue
+        if re.search(r"\byears?(?:\s+of)?\s+experience\b", window, flags=re.IGNORECASE):
             continue
         amount = _parse_salary_amount(match.group("amount"))
         if amount is None:

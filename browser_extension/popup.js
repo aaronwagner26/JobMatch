@@ -1,4 +1,5 @@
-const DEFAULT_SERVER_URL = 'http://127.0.0.1:8181';
+const DEFAULT_SERVER_URL = '';
+const STORAGE_KEYS = ['jobmatchServerUrl', 'jobmatchToken'];
 
 const serverUrlInput = document.querySelector('#serverUrl');
 const tokenInput = document.querySelector('#token');
@@ -9,32 +10,94 @@ const statusNode = document.querySelector('#status');
 void init();
 
 async function init() {
-  const stored = await chrome.storage.local.get(['jobmatchServerUrl', 'jobmatchToken']);
+  const stored = await loadConfig();
   serverUrlInput.value = stored.jobmatchServerUrl || DEFAULT_SERVER_URL;
   tokenInput.value = stored.jobmatchToken || '';
+
   testButton.addEventListener('click', () => void testConnection());
   captureButton.addEventListener('click', () => void captureVisibleJobs());
+
+  if (!serverUrlInput.value) {
+    const discovered = await discoverServerFromOpenTabs();
+    if (discovered.serverUrl) {
+      serverUrlInput.value = discovered.serverUrl;
+    }
+    if (discovered.token && !tokenInput.value) {
+      tokenInput.value = discovered.token;
+    }
+    if (discovered.serverUrl || discovered.token) {
+      await saveConfig();
+      setStatus(`Discovered JobMatch at ${serverUrlInput.value}.`);
+    }
+  } else if (!tokenInput.value) {
+    await hydrateTokenFromServer(false);
+  }
+}
+
+async function loadConfig() {
+  const [syncData, localData] = await Promise.all([
+    chrome.storage.sync.get(STORAGE_KEYS),
+    chrome.storage.local.get(STORAGE_KEYS),
+  ]);
+  return {
+    jobmatchServerUrl: syncData.jobmatchServerUrl || localData.jobmatchServerUrl || '',
+    jobmatchToken: syncData.jobmatchToken || localData.jobmatchToken || '',
+  };
 }
 
 async function saveConfig() {
   const serverUrl = normalizeServerUrl(serverUrlInput.value);
   const token = tokenInput.value.trim();
-  await chrome.storage.local.set({
+  const payload = {
     jobmatchServerUrl: serverUrl,
     jobmatchToken: token,
-  });
+  };
+  await Promise.all([
+    chrome.storage.sync.set(payload),
+    chrome.storage.local.set(payload),
+  ]);
   return { serverUrl, token };
+}
+
+async function hydrateTokenFromServer(showStatus = true) {
+  const serverUrl = normalizeServerUrl(serverUrlInput.value);
+  if (!serverUrl) {
+    return { ok: false };
+  }
+  try {
+    const payload = await fetchStatus(serverUrl);
+    if (payload.server_origin) {
+      serverUrlInput.value = normalizeServerUrl(payload.server_origin);
+    }
+    if (payload.browser_token) {
+      tokenInput.value = String(payload.browser_token);
+      await saveConfig();
+      if (showStatus) {
+        setStatus(`Connected to ${payload.app}.\nSaved token from ${serverUrlInput.value}.`);
+      }
+      return { ok: true, payload };
+    }
+    return { ok: true, payload };
+  } catch (error) {
+    if (showStatus) {
+      setStatus(`Connection failed.\n${errorMessage(error)}`);
+    }
+    return { ok: false, error };
+  }
 }
 
 async function testConnection() {
   setBusy(true);
   try {
     const { serverUrl } = await saveConfig();
-    const response = await fetch(`${serverUrl}/api/browser-capture/status`);
-    const payload = await response.json();
-    if (!response.ok) {
-      throw new Error(payload.detail || `HTTP ${response.status}`);
+    const payload = await fetchStatus(serverUrl);
+    if (payload.server_origin) {
+      serverUrlInput.value = normalizeServerUrl(payload.server_origin);
     }
+    if (payload.browser_token) {
+      tokenInput.value = String(payload.browser_token);
+    }
+    await saveConfig();
     setStatus(`Connected to ${payload.app}.\nPOST ${payload.capture_endpoint}`);
   } catch (error) {
     setStatus(`Connection failed.\n${errorMessage(error)}`);
@@ -47,9 +110,17 @@ async function captureVisibleJobs() {
   setBusy(true);
   try {
     setStatus('Capturing visible jobs from the current page.\nWalking visible result details when available...');
-    const { serverUrl, token } = await saveConfig();
+    const config = await saveConfig();
+    if (!config.serverUrl) {
+      throw new Error('Enter the JobMatch server URL first.');
+    }
+    let token = config.token;
     if (!token) {
-      throw new Error('Enter the browser capture token from JobMatch Settings first.');
+      const hydrated = await hydrateTokenFromServer(false);
+      token = hydrated.payload?.browser_token || tokenInput.value.trim();
+    }
+    if (!token) {
+      throw new Error('Could not obtain the browser capture token from JobMatch.');
     }
     const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
     if (!tab?.id) {
@@ -62,7 +133,7 @@ async function captureVisibleJobs() {
     if (!Array.isArray(capture.payload?.jobs) || capture.payload.jobs.length === 0) {
       throw new Error('No jobs were detected on the current page.');
     }
-    const response = await fetch(`${serverUrl}/api/browser-capture`, {
+    const response = await fetch(`${config.serverUrl}/api/browser-capture`, {
       method: 'POST',
       headers: {
         'Authorization': `Bearer ${token}`,
@@ -88,9 +159,57 @@ async function captureVisibleJobs() {
   }
 }
 
+async function discoverServerFromOpenTabs() {
+  const tabs = await chrome.tabs.query({});
+  const candidates = [];
+  const seen = new Set();
+
+  for (const tab of tabs) {
+    const url = normalizeServerUrl(tab.url || '');
+    if (!url || seen.has(url)) {
+      continue;
+    }
+    seen.add(url);
+    const title = String(tab.title || '');
+    const priority = /jobmatch/i.test(title) ? 0 : 1;
+    candidates.push({ url, priority });
+  }
+
+  candidates.sort((left, right) => left.priority - right.priority || left.url.localeCompare(right.url));
+  for (const candidate of candidates.slice(0, 12)) {
+    try {
+      const payload = await fetchStatus(candidate.url);
+      return {
+        serverUrl: normalizeServerUrl(payload.server_origin || candidate.url),
+        token: String(payload.browser_token || ''),
+      };
+    } catch (_error) {
+      continue;
+    }
+  }
+  return { serverUrl: '', token: '' };
+}
+
+async function fetchStatus(serverUrl) {
+  const response = await fetch(`${normalizeServerUrl(serverUrl)}/api/browser-capture/status`);
+  const payload = await response.json();
+  if (!response.ok) {
+    throw new Error(payload.detail || `HTTP ${response.status}`);
+  }
+  return payload;
+}
+
 function normalizeServerUrl(value) {
-  const trimmed = value.trim().replace(/\/+$/, '');
-  return trimmed || DEFAULT_SERVER_URL;
+  const trimmed = String(value || '').trim().replace(/\/+$/, '');
+  if (!trimmed) {
+    return DEFAULT_SERVER_URL;
+  }
+  try {
+    const url = new URL(trimmed);
+    return `${url.protocol}//${url.host}`;
+  } catch (_error) {
+    return trimmed;
+  }
 }
 
 function errorMessage(error) {

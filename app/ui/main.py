@@ -167,11 +167,14 @@ def _request_token(request: Request, payload: dict[str, Any]) -> str:
 
 
 @app.get("/api/browser-capture/status")
-async def browser_capture_status() -> dict[str, Any]:
+async def browser_capture_status(request: Request) -> dict[str, Any]:
+    server_origin = str(request.base_url).rstrip("/")
     return {
         "ok": True,
         "app": APP_NAME,
         "capture_endpoint": "/api/browser-capture",
+        "server_origin": server_origin,
+        "browser_token": ENGINE.get_browser_api_token(),
         "token_required": True,
     }
 
