@@ -149,7 +149,12 @@ async function captureIndeedPage() {
     const rawId = normalizeText(container?.getAttribute?.('data-jk') || anchor?.getAttribute?.('data-jk') || jobIdFromUrl(anchor?.href || ''));
     const url = canonicalIndeedJobUrl(anchor?.href || '', rawId);
     const selected = detailMap.get(rawId) || (detail && rawId && detail.raw_id === rawId ? detail : null);
-    const cardSalaryText = firstSalaryText(texts(container, ['.salary-snippet', '.estimated-salary', '[class*="salary"]', '[data-testid="attribute_snippet_testid"]']));
+    const cardMetaTexts = indeedCardMetaTexts(container);
+    const cardSalaryText = firstSalaryText([
+      ...texts(container, ['.salary-snippet', '.estimated-salary', '[class*="salary"]', '[data-testid="attribute_snippet_testid"]']),
+      ...cardMetaTexts,
+    ]);
+    const cardEmploymentText = cardMetaTexts.filter((value) => value && value !== cardSalaryText && looksLikeEmploymentText(value)).join(' | ');
     return {
       raw_id: rawId || url,
       title: text(anchor),
@@ -158,7 +163,7 @@ async function captureIndeedPage() {
       summary: selected?.summary || firstText(container, ['.job-snippet', '[data-testid="job-snippet"]']),
       description: selected?.description || '',
       salary_text: cardSalaryText || selected?.salary_text || '',
-      employment_text: selected?.employment_text || '',
+      employment_text: selected?.employment_text || cardEmploymentText || '',
       url: selected?.url || url,
       posted_at: firstText(container, ['.date', 'time']),
     };
@@ -406,7 +411,7 @@ async function captureVisibleResultDetails(cards, options) {
       currentDetail?.title
       && (
         normalizeText(currentDetail.raw_id) === rawId
-        || (expectedTitle && normalizeText(currentDetail.title) === expectedTitle)
+        || titlesProbablyMatch(currentDetail.title, expectedTitle)
       )
     ) {
       detailMap.set(rawId, currentDetail);
@@ -450,7 +455,7 @@ async function waitForDetailChange(rawId, expectedTitle, previousSignature, capt
       return detail;
     }
     const signature = detailSignature(detail);
-    if (signature && signature !== previousSignature && expectedTitle && normalizeText(detail.title) === expectedTitle) {
+    if (signature && signature !== previousSignature && titlesProbablyMatch(detail.title, expectedTitle)) {
       return detail;
     }
   }
@@ -506,6 +511,46 @@ function looksLikeGroupedOpeningsCard(node) {
     return false;
   }
   return /\bmultiple openings\b|\bmultiple jobs\b|\bhiring multiple\b|\bseveral openings\b|\bsee all\b/.test(value);
+}
+
+function indeedCardMetaTexts(container) {
+  return texts(container, [
+    '[data-testid="attribute_snippet_testid"]',
+    '[data-testid*="attribute"]',
+    '[class*="metadata"] li',
+    '[class*="metadata"] span',
+    '.metadata li',
+    '.metadata span',
+    'ul li',
+  ]).filter((value) => isCompactCardMeta(value));
+}
+
+function isCompactCardMeta(value) {
+  const textValue = normalizeText(value);
+  if (!textValue) {
+    return false;
+  }
+  if (textValue.length > 96) {
+    return false;
+  }
+  return true;
+}
+
+function looksLikeEmploymentText(value) {
+  return /\b(?:contract|full[\s-]?time|part[\s-]?time|temporary|temp[\s-]?to[\s-]?hire|internship|day shift|night shift|overnight|weekends?|overtime|monday to friday|remote|hybrid|on[\s-]?site)\b/i.test(normalizeText(value));
+}
+
+function titlesProbablyMatch(left, right) {
+  const a = normalizeTitleForMatch(left);
+  const b = normalizeTitleForMatch(right);
+  if (!a || !b) {
+    return false;
+  }
+  return a === b || a.includes(b) || b.includes(a);
+}
+
+function normalizeTitleForMatch(value) {
+  return normalizeText(value).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
 }
 
 function siteNameFromHost(host) {

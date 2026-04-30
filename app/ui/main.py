@@ -118,16 +118,18 @@ ui.add_css(
     .metric-chip-label { color: var(--app-muted); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.08em; font-weight: 600; }
     .metric-chip-value { color: var(--app-text); font-size: 0.86rem; font-weight: 700; }
     .results-mode-toggle .q-btn { min-height: 2rem; padding: 0 0.7rem; }
+    .match-table .q-table, .match-table .q-table__container, .match-table .q-table__middle { width: 100% !important; }
     .match-table .q-table__middle { overflow-x: hidden; }
-    .match-table table { width: 100% !important; min-width: 100%; }
+    .match-table table { width: 100% !important; min-width: 100%; table-layout: fixed; }
     .match-table th, .match-table td { white-space: normal; vertical-align: top; }
-    .match-col-expander { width: 2.5rem; max-width: 2.5rem; }
-    .match-col-score { width: 6rem; max-width: 6rem; }
-    .match-col-type { width: 6.75rem; max-width: 6.75rem; }
-    .match-col-salary { width: 11rem; max-width: 11rem; }
-    .match-col-open { width: 3rem; max-width: 3rem; text-align: right; }
-    .match-col-company { width: 11rem; max-width: 11rem; }
-    .match-col-location { width: 10.5rem; max-width: 10.5rem; }
+    .match-col-expander { width: 2rem; max-width: 2rem; }
+    .match-col-score { width: 5.5rem; max-width: 5.5rem; }
+    .match-col-type { width: 7.5rem; max-width: 7.5rem; }
+    .match-col-salary { width: 10rem; max-width: 10rem; text-align: right; }
+    .match-col-open { width: 2.4rem; max-width: 2.4rem; text-align: right; }
+    .match-col-company { width: 12rem; max-width: 12rem; }
+    .match-col-location { width: 12rem; max-width: 12rem; }
+    .match-col-title { width: auto; }
     .match-col-expander, .match-col-score, .match-col-type, .match-col-salary, .match-col-open { padding-left: 0.4rem !important; padding-right: 0.4rem !important; }
     .match-table .q-btn.open-job-btn { min-width: 1.9rem; min-height: 1.9rem; padding: 0; }
     .match-table .q-btn.expand-btn { min-width: 1.7rem; min-height: 1.7rem; }
@@ -148,6 +150,7 @@ ui.add_css(
     body.body--dark .salary-pill { color: #c4b5fd; }
     .job-primary { font-weight: 600; color: var(--app-text); }
     .job-secondary { color: var(--app-muted); font-size: 0.88rem; }
+    .match-col-title .job-primary { line-height: 1.35; word-break: break-word; }
     .detail-grid { display: grid; grid-template-columns: 1.2fr 0.8fr 1fr; gap: 1rem; }
     .detail-block { padding-top: 0.2rem; }
     .detail-title { font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--app-muted); margin-bottom: 0.45rem; }
@@ -1708,20 +1711,20 @@ class JobMatchUI:
             else [self._job_row(job, secondary_label or "Cached job.") for job in items]
         )
         columns = [
-            {"name": "expander", "label": "", "field": "id", "style": "width: 2.5rem", "headerStyle": "width: 2.5rem"},
+            {"name": "expander", "label": "", "field": "id", "style": "width: 2rem", "headerStyle": "width: 2rem"},
         ]
         if ranked:
             columns.append(
-                {"name": "score_value", "label": "Match", "field": "score_value", "sortable": True, "style": "width: 6rem", "headerStyle": "width: 6rem"}
+                {"name": "score_value", "label": "Match", "field": "score_value", "sortable": True, "style": "width: 5.5rem", "headerStyle": "width: 5.5rem"}
             )
         columns.extend(
             [
-                {"name": "title", "label": "Role", "field": "title", "sortable": True, "style": "min-width: 16rem", "headerStyle": "min-width: 16rem"},
-                {"name": "company", "label": "Company", "field": "company", "sortable": True, "style": "width: 9.5rem", "headerStyle": "width: 9.5rem"},
-                {"name": "location", "label": "Location", "field": "location", "sortable": True, "style": "width: 9.5rem", "headerStyle": "width: 9.5rem"},
-                {"name": "job_type", "label": "Type", "field": "job_type", "sortable": True, "style": "width: 6rem", "headerStyle": "width: 6rem"},
+                {"name": "title", "label": "Role", "field": "title", "sortable": True, "style": "width: 38%", "headerStyle": "width: 38%"},
+                {"name": "company", "label": "Company", "field": "company", "sortable": True, "style": "width: 18%", "headerStyle": "width: 18%"},
+                {"name": "location", "label": "Location", "field": "location", "sortable": True, "style": "width: 18%", "headerStyle": "width: 18%"},
+                {"name": "job_type", "label": "Type", "field": "job_type", "sortable": True, "style": "width: 7.5rem", "headerStyle": "width: 7.5rem"},
                 {"name": "salary_text", "label": "Salary", "field": "salary_text", "sortable": True, "style": "width: 10rem", "headerStyle": "width: 10rem"},
-                {"name": "open_action", "label": "", "field": "open_action", "style": "width: 3rem", "headerStyle": "width: 3rem"},
+                {"name": "open_action", "label": "", "field": "open_action", "style": "width: 2.4rem", "headerStyle": "width: 2.4rem"},
             ]
         )
         pagination = {"rowsPerPage": 18, "sortBy": "score_value", "descending": True} if ranked else {"rowsPerPage": 18}
@@ -1740,7 +1743,7 @@ class JobMatchUI:
                   @click="props.expand = !props.expand" />
               </q-td>
               __SCORE_CELL__
-              <q-td key="title" :props="props">
+              <q-td key="title" :props="props" class="match-col-title">
                 <div class="job-primary">{{ props.row.title }}</div>
                 <div class="job-secondary">{{ props.row.matched_summary }}</div>
               </q-td>
