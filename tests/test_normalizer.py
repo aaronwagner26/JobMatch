@@ -135,3 +135,29 @@ def test_job_normalizer_moves_non_salary_fragments_into_employment_text() -> Non
     assert job.salary_text is None
     assert job.job_type == "full-time"
     assert job.employment_text == "Full-time"
+
+
+def test_job_normalizer_discards_embedded_script_noise_from_description() -> None:
+    source = JobSourceConfig(id=1, name="Example Board", source_type="custom_url", url="https://example.com/jobs")
+    job = JobNormalizer().normalize(
+        source,
+        {
+            "raw_id": "job-2000",
+            "title": "Data Engineer",
+            "company": "Example Co",
+            "location": "Remote",
+            "description": """
+            <div>
+              <script>window.__ERROR__=[]; function n(t){var r={}; //# sourceMappingURL=queueJavascriptErrors.min.js.map</script>
+              <div id="jobDescriptionText">
+                Build Python and AWS data pipelines for internal analytics.
+              </div>
+            </div>
+            """,
+            "url": "https://example.com/jobs/job-2000",
+        },
+    )
+
+    assert "Build Python and AWS data pipelines" in job.description
+    assert "sourceMappingURL" not in job.description
+    assert "window.__ERROR__" not in job.description

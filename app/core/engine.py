@@ -29,7 +29,7 @@ from app.core.types import (
 )
 from app.db.storage import Storage
 from app.utils.config import DEFAULT_SCAN_CONCURRENCY, DEFAULT_SETTINGS, EXPORTS_DIR, UPLOADS_DIR, ensure_directories
-from app.utils.text import capture_job_url, canonical_job_key, normalize_whitespace, safe_filename, sanitize_source_url
+from app.utils.text import capture_job_url, canonical_job_key, clean_job_text, normalize_whitespace, safe_filename, sanitize_source_url
 
 
 class JobMatchEngine:
@@ -563,8 +563,8 @@ class JobMatchEngine:
         payload["company"] = normalize_whitespace(str(item.get("company") or source.name))
         payload["title"] = normalize_whitespace(str(item.get("title") or ""))
         payload["location"] = normalize_whitespace(str(item.get("location") or ""))
-        payload["summary"] = normalize_whitespace(str(item.get("summary") or ""))
-        payload["description"] = normalize_whitespace(str(item.get("description") or payload["summary"] or ""))
+        payload["summary"] = clean_job_text(str(item.get("summary") or ""))
+        payload["description"] = clean_job_text(str(item.get("description") or payload["summary"] or ""))
         payload["employment_text"] = normalize_whitespace(str(item.get("employment_text") or ""))
         metadata = dict(item.get("metadata") or {}) if isinstance(item.get("metadata"), dict) else {}
         metadata.update(

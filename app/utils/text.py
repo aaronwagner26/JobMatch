@@ -14,6 +14,10 @@ from dateutil import parser as date_parser
 
 WHITESPACE_RE = re.compile(r"\s+")
 NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
+SCRIPT_NOISE_RE = re.compile(
+    r"(sourceMappingURL|window\.__|window\.onerror|webpack|rspack|bundler=|pixelRatio|screenWidth|screenHeight|function\s*\(|var\s+\w+\s*=\s*\{)",
+    re.IGNORECASE,
+)
 TRACKING_QUERY_KEYS = {
     "cf-turnstile-response",
     "fbclid",
@@ -57,7 +61,22 @@ def strip_html(markup: str | None) -> str:
     if not markup:
         return ""
     soup = BeautifulSoup(markup, "html.parser")
+    for tag in soup(["script", "style", "noscript", "template"]):
+        tag.decompose()
     return normalize_whitespace(soup.get_text(" "))
+
+
+def clean_job_text(value: str | None) -> str:
+    if not value:
+        return ""
+    text = strip_html(value) if "<" in value and ">" in value else normalize_whitespace(value)
+    if not text:
+        return ""
+    sample = text[:1200]
+    noise_hits = len(SCRIPT_NOISE_RE.findall(sample))
+    if noise_hits >= 2:
+        return ""
+    return text
 
 
 def safe_filename(value: str, suffix: str = "") -> str:

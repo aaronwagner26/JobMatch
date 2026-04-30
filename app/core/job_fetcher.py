@@ -34,7 +34,7 @@ from app.utils.config import (
     DEFAULT_REQUEST_BACKOFF_MULTIPLIER,
     DEFAULT_REQUEST_MAX_RETRIES,
 )
-from app.utils.text import absolute_url, normalize_whitespace, safe_filename, sanitize_source_url, strip_html
+from app.utils.text import absolute_url, clean_job_text, normalize_whitespace, safe_filename, sanitize_source_url, strip_html
 
 logger = logging.getLogger(__name__)
 
@@ -847,9 +847,9 @@ class JobFetcher:
             return payload
 
         primary = soup.select_one(
-            ".jobsearch-JobComponent-description, .jobsearch-jobDescriptionText, .jobDescriptionText, article, main, [role='main'], .posting, .job-description"
+            "#jobDescriptionText, .jobsearch-JobComponent-description, .jobsearch-jobDescriptionText, .jobDescriptionText, .posting, .job-description"
         )
-        description = normalize_whitespace(primary.get_text(" ")) if primary else ""
+        description = clean_job_text(str(primary)) if primary else ""
         salary_text = self._best_salary_text(
             soup,
             [
@@ -1176,9 +1176,9 @@ class JobFetcher:
                     soup = BeautifulSoup(dynamic_html, "html.parser")
                 except Exception:
                     return
-                primary = soup.select_one(".jobDescriptionText, article, main, [role='main'], .posting, .job-description")
+                primary = soup.select_one("#jobDescriptionText, .jobDescriptionText, .posting, .job-description")
                 if primary:
-                    job["description"] = normalize_whitespace(primary.get_text(" "))
+                    job["description"] = clean_job_text(str(primary))
                 if not job.get("company"):
                     job["company"] = self._first_text(soup, [".company", "[itemprop='hiringOrganization']"])
                 if not job.get("location"):
@@ -1603,8 +1603,10 @@ class JobFetcher:
             return ""
         for selector in selectors:
             node = container.select_one(selector) if hasattr(container, "select_one") else None
-            if node and node.get_text():
-                return normalize_whitespace(node.get_text(" "))
+            if node:
+                text = clean_job_text(str(node))
+                if text:
+                    return text
         return ""
 
     @staticmethod
@@ -1616,7 +1618,7 @@ class JobFetcher:
         for selector in selectors:
             nodes = container.select(selector) if hasattr(container, "select") else []
             for node in nodes:
-                text = normalize_whitespace(node.get_text(" "))
+                text = clean_job_text(str(node))
                 if not text:
                     continue
                 folded = text.casefold()

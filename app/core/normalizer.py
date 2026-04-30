@@ -13,6 +13,7 @@ from app.utils.skills import (
 )
 from app.utils.text import (
     canonical_job_url,
+    clean_job_text,
     clipped_excerpt,
     dt_to_iso,
     normalize_whitespace,
@@ -37,7 +38,7 @@ class JobNormalizer:
         title = normalize_whitespace(payload.get("title"))
         company = normalize_whitespace(payload.get("company") or source.name)
         location = normalize_whitespace(payload.get("location"))
-        description = normalize_whitespace(payload.get("description") or payload.get("summary") or "")
+        description = clean_job_text(str(payload.get("description") or payload.get("summary") or ""))
         raw_salary_text = normalize_whitespace(str(payload.get("salary_text") or ""))
         raw_employment_text = normalize_whitespace(str(payload.get("employment_text") or ""))
         if not title:

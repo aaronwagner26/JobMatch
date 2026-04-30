@@ -186,8 +186,6 @@ function captureIndeedSelectedDetail(rawIdHint = '', options = {}) {
     '.jobsearch-JobComponent-description',
     '.jobsearch-jobDescriptionText',
     '.jobDescriptionText',
-    'article',
-    'main',
   ]) || jsonLdMatch?.description || '';
   const salaryCandidates = [
     ...texts(document, [
@@ -560,7 +558,13 @@ function firstSalaryText(values) {
 }
 
 function text(node) {
-  return normalizeText(node?.textContent || '');
+  if (!node) {
+    return '';
+  }
+  const value = node instanceof HTMLElement
+    ? (node.innerText || node.textContent || '')
+    : (node.textContent || '');
+  return normalizeText(value);
 }
 
 function normalizeText(value) {

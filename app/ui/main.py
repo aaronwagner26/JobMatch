@@ -26,7 +26,7 @@ from app.utils.config import (
 )
 from app.utils.logging import configure_logging
 from app.utils.skills import CLEARANCE_PATTERNS, detect_job_type, extract_salary_info
-from app.utils.text import clipped_excerpt, normalize_whitespace, safe_filename
+from app.utils.text import clean_job_text, clipped_excerpt, normalize_whitespace, safe_filename
 
 configure_logging()
 
@@ -119,8 +119,8 @@ ui.add_css(
     .metric-chip-value { color: var(--app-text); font-size: 0.86rem; font-weight: 700; }
     .results-mode-toggle .q-btn { min-height: 2rem; padding: 0 0.7rem; }
     .match-table .q-table__middle { overflow-x: hidden; }
-    .match-table table { width: 100%; table-layout: fixed; }
-    .match-table th, .match-table td { white-space: normal; }
+    .match-table table { width: 100% !important; min-width: 100%; }
+    .match-table th, .match-table td { white-space: normal; vertical-align: top; }
     .match-col-expander { width: 2.5rem; max-width: 2.5rem; }
     .match-col-score { width: 6rem; max-width: 6rem; }
     .match-col-type { width: 6.75rem; max-width: 6.75rem; }
@@ -1716,11 +1716,11 @@ class JobMatchUI:
             )
         columns.extend(
             [
-                {"name": "title", "label": "Role", "field": "title", "sortable": True},
-                {"name": "company", "label": "Company", "field": "company", "sortable": True, "style": "width: 11rem", "headerStyle": "width: 11rem"},
-                {"name": "location", "label": "Location", "field": "location", "sortable": True, "style": "width: 10.5rem", "headerStyle": "width: 10.5rem"},
-                {"name": "job_type", "label": "Type", "field": "job_type", "sortable": True, "style": "width: 6.75rem", "headerStyle": "width: 6.75rem"},
-                {"name": "salary_text", "label": "Salary", "field": "salary_text", "sortable": True, "style": "width: 11rem", "headerStyle": "width: 11rem"},
+                {"name": "title", "label": "Role", "field": "title", "sortable": True, "style": "min-width: 16rem", "headerStyle": "min-width: 16rem"},
+                {"name": "company", "label": "Company", "field": "company", "sortable": True, "style": "width: 9.5rem", "headerStyle": "width: 9.5rem"},
+                {"name": "location", "label": "Location", "field": "location", "sortable": True, "style": "width: 9.5rem", "headerStyle": "width: 9.5rem"},
+                {"name": "job_type", "label": "Type", "field": "job_type", "sortable": True, "style": "width: 6rem", "headerStyle": "width: 6rem"},
+                {"name": "salary_text", "label": "Salary", "field": "salary_text", "sortable": True, "style": "width: 10rem", "headerStyle": "width: 10rem"},
                 {"name": "open_action", "label": "", "field": "open_action", "style": "width: 3rem", "headerStyle": "width: 3rem"},
             ]
         )
@@ -1839,7 +1839,7 @@ class JobMatchUI:
             "posted_at": match.job.posted_at.strftime("%Y-%m-%d") if match.job.posted_at else "Unknown",
             "url": match.job.url,
             "source_name": match.job.source_name,
-            "description": clipped_excerpt(match.job.description, 1200),
+            "description": clipped_excerpt(clean_job_text(match.job.description), 1200),
         }
 
     @staticmethod
@@ -1863,7 +1863,7 @@ class JobMatchUI:
             "posted_at": job.posted_at.strftime("%Y-%m-%d") if job.posted_at else "Unknown",
             "url": job.url,
             "source_name": job.source_name,
-            "description": clipped_excerpt(job.description, 1200),
+            "description": clipped_excerpt(clean_job_text(job.description), 1200),
         }
 
     @staticmethod
