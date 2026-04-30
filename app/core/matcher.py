@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from app.core.scoring import EmbeddingService, HybridScorer
 from app.core.types import FilterCriteria, MatchResult, MatchWeights, NormalizedJob, ResumeProfile
-from app.utils.skills import match_skills
+from app.utils.skills import extract_salary_info, match_skills
 from app.utils.text import unique_sorted
 
 
@@ -130,6 +130,7 @@ class JobMatcher:
             reasons.append(f"Clearance alignment: matched {', '.join(matched_clearance)}.")
         elif job.clearance_terms:
             reasons.append(f"Extracted clearance requirement: {', '.join(job.clearance_terms)}.")
-        if job.salary_text:
-            reasons.append(f"Extracted compensation: {job.salary_text}.")
+        salary_display = extract_salary_info(job.salary_text or "").get("display") if job.salary_text else None
+        if salary_display:
+            reasons.append(f"Extracted compensation: {salary_display}.")
         return reasons

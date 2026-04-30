@@ -46,11 +46,13 @@ JOB_TYPES = [
     "internship",
     "apprenticeship",
 ]
+THEME_MODES = ["auto", "light", "dark"]
 
 DEFAULT_SETTINGS = {
     "embedding_weight": 0.68,
     "skill_weight": 0.22,
     "experience_weight": 0.10,
+    "theme_mode": "auto",
     "scheduler_enabled": False,
     "scheduler_interval_minutes": 180,
     "scheduler_source_ids": [],

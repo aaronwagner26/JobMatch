@@ -21,11 +21,12 @@ from app.utils.config import (
     JOB_TYPES,
     REMOTE_MODES,
     SOURCE_TYPES,
+    THEME_MODES,
     UPLOADS_DIR,
 )
 from app.utils.logging import configure_logging
-from app.utils.skills import CLEARANCE_PATTERNS
-from app.utils.text import clipped_excerpt, safe_filename
+from app.utils.skills import CLEARANCE_PATTERNS, extract_salary_info
+from app.utils.text import clipped_excerpt, normalize_whitespace, safe_filename
 
 configure_logging()
 
@@ -111,6 +112,13 @@ ui.add_css(
     .toolbar-grid { display: grid; grid-template-columns: 1.3fr 0.9fr 0.9fr 1.1fr auto auto auto; gap: 0.75rem; width: 100%; align-items: end; }
     .toolbar-grid .q-field, .toolbar-grid .q-select, .toolbar-grid .q-input { width: 100%; }
     .results-shell .q-table__middle { max-height: calc(100vh - 300px); }
+    .match-table .q-table__middle { overflow-x: hidden; }
+    .match-table table { width: 100%; table-layout: fixed; }
+    .match-table th, .match-table td { white-space: normal; }
+    .match-role-meta { display: flex; flex-wrap: wrap; gap: 0.35rem 0.65rem; margin-top: 0.3rem; font-size: 0.82rem; color: var(--app-muted); }
+    .match-role-meta span { white-space: nowrap; }
+    .scan-actions { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: center; justify-content: space-between; width: 100%; }
+    .scan-actions-left, .scan-actions-right { display: flex; flex-wrap: wrap; gap: 0.6rem; align-items: center; }
     .scan-grid { display: grid; grid-template-columns: minmax(460px, 1.15fr) minmax(320px, 0.85fr); gap: 1rem; width: 100%; }
     .scan-metrics { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 0.75rem; width: 100%; }
     .scan-status-row { display: flex; align-items: center; gap: 0.75rem; }
@@ -213,6 +221,7 @@ class UIState:
     scan_rows: list[dict[str, Any]] = field(default_factory=list)
     scan_log_lines: list[str] = field(default_factory=list)
     recent_scans: list[dict[str, Any]] = field(default_factory=list)
+    last_scan_text: str = "Never"
     selected_source_id: int | None = None
     manual_job_urls: str = ""
     discovery_query: str = ""
@@ -239,12 +248,11 @@ class JobMatchUI:
     def __init__(self, engine: JobMatchEngine) -> None:
         self.engine = engine
         self.state = UIState()
-        self.dark_mode = ui.dark_mode(False)
+        self.dark_mode = ui.dark_mode(self._theme_setting_to_value(str(self.engine.get_settings().get("theme_mode", "auto"))))
         self.client = None
         self.content = None
         self.nav_shell = None
         self.status_label = None
-        self.last_scan_label = None
         self.scan_button = None
         self.stop_scan_button = None
         self.clear_results_button = None
@@ -268,16 +276,7 @@ class JobMatchUI:
                         ui.label("Local resume-to-job matcher").classes("text-slate-300 text-xs tracking-wide uppercase")
                     self.status_label = ui.label("Ready").classes("text-slate-200 text-sm")
                 with ui.row().classes("items-center gap-3"):
-                    self.last_scan_label = ui.label("Last scan: never").classes("text-slate-300 text-sm")
-                    ui.switch("Dark", value=False, on_change=lambda e: self.dark_mode.set_value(e.value)).classes("text-white")
-                    self.scan_button = ui.button("Scan now", icon="sync", on_click=lambda: asyncio.create_task(self.handle_scan())).props("unelevated")
-                    self.stop_scan_button = ui.button("Stop scan", icon="stop_circle", on_click=self.request_scan_stop).props("flat color=negative")
-                    self.clear_results_button = ui.button(
-                        "Start fresh",
-                        icon="delete_sweep",
-                        on_click=lambda: asyncio.create_task(self.clear_scan_results()),
-                    ).props("flat color=warning")
-                    self.stop_scan_button.disable()
+                    ui.label("Browser capture ready").classes("text-slate-300 text-sm")
 
         with ui.left_drawer(value=True, bordered=False, elevated=False).classes("app-drawer w-72"):
             self.nav_shell = ui.column().classes("w-full gap-3 p-4")
@@ -350,14 +349,35 @@ class JobMatchUI:
             task.cancel()
         self._background_tasks.clear()
 
-    async def bootstrap(self) -> None:
-        if self._client_deleted:
-            return
+    @staticmethod
+    def _theme_setting_to_value(theme_mode: str) -> bool | None:
+        if theme_mode == "dark":
+            return True
+        if theme_mode == "light":
+            return False
+        return None
+
+    def _apply_theme_mode(self, theme_mode: str) -> None:
+        value = self._theme_setting_to_value(theme_mode)
+        if value is None:
+            self.dark_mode.auto()
+        else:
+            self.dark_mode.set_value(value)
+
+    def _sync_last_scan_text(self) -> None:
         scans = self.engine.list_recent_scans(limit=1)
         self.state.recent_scans = self.engine.list_recent_scans(limit=8)
         if scans and scans[0].get("finished_at"):
             finished_at = scans[0]["finished_at"]
-            self.last_scan_label.set_text(f"Last scan: {finished_at:%Y-%m-%d %H:%M}")
+            self.state.last_scan_text = finished_at.strftime("%Y-%m-%d %H:%M")
+        else:
+            self.state.last_scan_text = "Never"
+
+    async def bootstrap(self) -> None:
+        if self._client_deleted:
+            return
+        self._apply_theme_mode(str(self.engine.get_settings().get("theme_mode", "auto")))
+        self._sync_last_scan_text()
         if self.engine.get_active_resume():
             try:
                 self.state.matches = await asyncio.to_thread(self.engine.get_ranked_matches, self.current_filters())
@@ -380,6 +400,7 @@ class JobMatchUI:
             ui.label(APP_NAME).classes("drawer-title mb-2")
             items = [
                 ("dashboard", "Dashboard", "table_view"),
+                ("scans", "Scans", "sync"),
                 ("sources", "Sources", "travel_explore"),
                 ("resume", "Resume", "description"),
                 ("settings", "Settings", "tune"),
@@ -401,6 +422,9 @@ class JobMatchUI:
     def render_current_view(self) -> None:
         if self._client_deleted or self.content is None:
             return
+        self.scan_button = None
+        self.stop_scan_button = None
+        self.clear_results_button = None
         self.scan_summary_panel = None
         self.scan_log_panel = None
         self.scan_log_widget = None
@@ -408,6 +432,8 @@ class JobMatchUI:
         with self.content:
             if self.state.current_view == "dashboard":
                 self.render_dashboard()
+            elif self.state.current_view == "scans":
+                self.render_scans()
             elif self.state.current_view == "sources":
                 self.render_sources()
             elif self.state.current_view == "resume":
@@ -418,11 +444,12 @@ class JobMatchUI:
     def render_dashboard(self) -> None:
         resume = self.engine.get_active_resume()
         sources = self.engine.list_sources()
+        cached_jobs = len(self.engine.storage.list_jobs())
         with ui.column().classes("w-full gap-4"):
             with ui.row().classes("w-full items-end justify-between"):
                 with ui.column().classes("gap-1"):
                     ui.label("Dashboard").classes("page-title")
-                    ui.label("Ranked matches, filters, exports, and scan control live in one working surface.").classes("page-subtitle")
+                    ui.label("Ranked matches, filters, and exports in one working surface.").classes("page-subtitle")
                 with ui.row().classes("gap-2"):
                     ui.button("Rank jobs", icon="auto_awesome", on_click=lambda: asyncio.create_task(self.refresh_matches())).props("unelevated")
                     ui.button("Export CSV", icon="download", on_click=lambda: self.handle_export("csv")).props("flat")
@@ -451,16 +478,8 @@ class JobMatchUI:
                 with ui.element("div").classes("stat-strip"):
                     self._stat_block("Resume", resume.filename if resume else "None loaded")
                     self._stat_block("Sources", str(len(sources)))
+                    self._stat_block("Cached jobs", str(cached_jobs))
                     self._stat_block("Matches", str(len(self.state.matches)))
-                    self._stat_block("Last scan", self.last_scan_label.text.replace("Last scan: ", ""))
-
-            with ui.element("div").classes("scan-grid"):
-                with ui.element("section").classes("panel"):
-                    self.scan_summary_panel = ui.column().classes("w-full gap-3")
-                    self.render_scan_summary_panel()
-                with ui.element("section").classes("panel"):
-                    self.scan_log_panel = ui.column().classes("w-full gap-3")
-                    self.render_scan_log_panel()
 
             with ui.element("section").classes("panel results-shell"):
                 if self.state.match_error and not self.state.matches:
@@ -470,9 +489,70 @@ class JobMatchUI:
                 elif not sources:
                     self._empty_state("Add at least one source so the scan engine has something to pull from.")
                 elif not self.state.matches:
-                    self._empty_state("No matches yet. Run a scan or adjust the filters, then rank the jobs.")
+                    self._empty_state("No matches yet. Import jobs from the extension or run a scheduled scan, then rank the jobs.")
                 else:
                     self._render_results_table(self.state.matches)
+
+    def render_scans(self) -> None:
+        sources = self.engine.list_sources()
+        scanable_sources = self.engine.list_scanable_sources()
+        manual_sources = [source for source in sources if self.engine.is_manual_assist_source(source)]
+        settings = self.engine.get_settings()
+        cadence = f"{int(settings.get('scheduler_interval_minutes', 180))} min" if settings.get("scheduler_enabled") else "Off"
+        with ui.column().classes("w-full gap-4"):
+            with ui.row().classes("w-full items-end justify-between"):
+                with ui.column().classes("gap-1"):
+                    ui.label("Scans").classes("page-title")
+                    ui.label("Run scheduled sources, review scan outcomes, and clear cached scan state.").classes("page-subtitle")
+
+            with ui.element("section").classes("panel panel-tight"):
+                with ui.element("div").classes("scan-actions"):
+                    with ui.element("div").classes("scan-actions-left"):
+                        self.scan_button = ui.button(
+                            "Scan now",
+                            icon="sync",
+                            on_click=lambda: asyncio.create_task(self.handle_scan()),
+                        ).props("unelevated")
+                        self.stop_scan_button = ui.button(
+                            "Stop scan",
+                            icon="stop_circle",
+                            on_click=self.request_scan_stop,
+                        ).props("flat color=negative")
+                        self.clear_results_button = ui.button(
+                            "Start fresh",
+                            icon="delete_sweep",
+                            on_click=lambda: asyncio.create_task(self.clear_scan_results()),
+                        ).props("flat color=warning")
+                    with ui.element("div").classes("scan-actions-right"):
+                        ui.label(f"Last scan: {self.state.last_scan_text}").classes("muted-copy text-sm")
+                if self.state.scan_running:
+                    if self.scan_button is not None:
+                        self.scan_button.disable()
+                    if self.clear_results_button is not None:
+                        self.clear_results_button.disable()
+                elif self.stop_scan_button is not None:
+                    self.stop_scan_button.disable()
+
+            with ui.element("section").classes("panel"):
+                with ui.element("div").classes("stat-strip"):
+                    self._stat_block("Scanable sources", str(len(scanable_sources)))
+                    self._stat_block("Manual assist", str(len(manual_sources)))
+                    self._stat_block("Scheduler", cadence)
+                    self._stat_block("Last scan", self.state.last_scan_text)
+
+            if not scanable_sources:
+                message = "No scheduled scan sources are enabled. Browser-capture sources refresh from the extension instead of Scan now."
+                if not sources:
+                    message = "No sources are configured yet. Add ATS boards in Sources or import jobs from the browser extension first."
+                ui.label(message).classes("info-banner text-sm")
+
+            with ui.element("div").classes("scan-grid"):
+                with ui.element("section").classes("panel"):
+                    self.scan_summary_panel = ui.column().classes("w-full gap-3")
+                    self.render_scan_summary_panel()
+                with ui.element("section").classes("panel"):
+                    self.scan_log_panel = ui.column().classes("w-full gap-3")
+                    self.render_scan_log_panel()
 
     def render_sources(self) -> None:
         sources = self.engine.list_sources()
@@ -482,7 +562,7 @@ class JobMatchUI:
             with ui.row().classes("w-full items-end justify-between"):
                 with ui.column().classes("gap-1"):
                     ui.label("Sources").classes("page-title")
-                    ui.label("Manage API boards and scraping targets in one place.").classes("page-subtitle")
+                    ui.label("Manage ATS boards, discovery targets, and browser-assisted source inputs in one place.").classes("page-subtitle")
                 with ui.row().classes("gap-2"):
                     ui.button("New source", icon="add", on_click=self.reset_source_form).props("unelevated")
                     ui.button("Save source", icon="save", on_click=self.save_source_form).props("unelevated")
@@ -664,11 +744,19 @@ class JobMatchUI:
             with ui.row().classes("w-full items-end justify-between"):
                 with ui.column().classes("gap-1"):
                     ui.label("Settings").classes("page-title")
-                    ui.label("Tune scan cadence and the hybrid score weights without changing code.").classes("page-subtitle")
+                    ui.label("Tune theme, scan cadence, and the hybrid score weights without changing code.").classes("page-subtitle")
                 ui.button("Save settings", icon="save", on_click=self.save_settings).props("unelevated")
 
             with ui.element("div").classes("settings-grid"):
                 with ui.element("section").classes("panel"):
+                    self.settings_inputs["theme_mode"] = ui.select(
+                        THEME_MODES,
+                        value=str(settings.get("theme_mode", "auto")),
+                        label="Theme mode",
+                    ).props("outlined").classes("w-full")
+                    ui.label("Auto follows the browser or operating system color preference by default.").classes(
+                        "mt-2 muted-copy text-sm"
+                    )
                     self.settings_inputs["scheduler_enabled"] = ui.switch("Enable periodic refresh", value=bool(settings.get("scheduler_enabled", False)))
                     ui.label("Periodic refresh skips manual-assist sources that use browser profiles or Indeed searches.").classes(
                         "mt-2 muted-copy text-sm"
@@ -919,8 +1007,8 @@ class JobMatchUI:
             self.state.scan_running = False
             self.state.scan_stop_requested = False
             self.state.scan_status = self._scan_complete_status(summary)
-            if summary.results:
-                self.last_scan_label.set_text(f"Last scan: {summary.finished_at:%Y-%m-%d %H:%M}")
+            if summary.finished_at:
+                self.state.last_scan_text = summary.finished_at.strftime("%Y-%m-%d %H:%M")
             self.state.recent_scans = self.engine.list_recent_scans(limit=8)
             await self.refresh_matches(record_activity=True)
         except Exception as exc:
@@ -984,7 +1072,7 @@ class JobMatchUI:
             self.state.scan_rows = []
             self.state.recent_scans = []
             self.state.scan_log_lines = []
-            self.last_scan_label.set_text("Last scan: never")
+            self.state.last_scan_text = "Never"
             self._append_activity("Cleared cached jobs, scan history, and source cache state.")
             self._notify("Cleared cached jobs and scan history.", type="positive")
         except Exception as exc:
@@ -1102,6 +1190,7 @@ class JobMatchUI:
     def save_settings(self) -> None:
         values = {key: element.value for key, element in self.settings_inputs.items()}
         self.engine.update_settings(values)
+        self._apply_theme_mode(str(values.get("theme_mode", "auto")))
         if self.state.current_view == "settings":
             self.render_current_view()
         self._notify("Settings saved.", type="positive")
@@ -1578,14 +1667,11 @@ class JobMatchUI:
             {"name": "expander", "label": "", "field": "id"},
             {"name": "score_value", "label": "Match", "field": "score_value", "sortable": True},
             {"name": "title", "label": "Role", "field": "title", "sortable": True},
-            {"name": "company", "label": "Company", "field": "company", "sortable": True},
-            {"name": "location", "label": "Location", "field": "location", "sortable": True},
-            {"name": "remote_mode", "label": "Remote", "field": "remote_mode", "sortable": True},
             {"name": "job_type", "label": "Type", "field": "job_type", "sortable": True},
             {"name": "salary_text", "label": "Salary", "field": "salary_text", "sortable": True},
             {"name": "open_action", "label": "", "field": "open_action"},
         ]
-        table = ui.table(rows=rows, columns=columns, row_key="id", pagination={"rowsPerPage": 18, "sortBy": "score_value", "descending": True}).classes("w-full")
+        table = ui.table(rows=rows, columns=columns, row_key="id", pagination={"rowsPerPage": 18, "sortBy": "score_value", "descending": True}).classes("w-full match-table")
         table.props("flat square separator=horizontal")
         table.add_slot(
             "body",
@@ -1602,10 +1688,12 @@ class JobMatchUI:
               <q-td key="title" :props="props">
                 <div class="job-primary">{{ props.row.title }}</div>
                 <div class="job-secondary">{{ props.row.matched_summary }}</div>
+                <div class="match-role-meta">
+                  <span>{{ props.row.company }}</span>
+                  <span>{{ props.row.location }}</span>
+                  <span>{{ props.row.remote_mode }}</span>
+                </div>
               </q-td>
-              <q-td key="company" :props="props">{{ props.row.company }}</q-td>
-              <q-td key="location" :props="props">{{ props.row.location }}</q-td>
-              <q-td key="remote_mode" :props="props">{{ props.row.remote_mode }}</q-td>
               <q-td key="job_type" :props="props">{{ props.row.job_type }}</q-td>
               <q-td key="salary_text" :props="props">
                 <span v-if="props.row.salary_text" class="salary-pill">{{ props.row.salary_text }}</span>
@@ -1640,6 +1728,7 @@ class JobMatchUI:
                   <div class="detail-block">
                     <div class="detail-title">Posting Details</div>
                     <div class="detail-copy">Source: {{ props.row.source_name }}</div>
+                    <div class="detail-copy">Type: {{ props.row.job_type || 'unspecified' }}</div>
                     <div class="detail-copy">Salary: {{ props.row.salary_text || 'Not provided' }}</div>
                     <div class="detail-copy">Clearance: {{ props.row.clearance }}</div>
                     <div class="detail-copy">Posted: {{ props.row.posted_at }}</div>
@@ -1672,6 +1761,7 @@ class JobMatchUI:
         missing_skills = ", ".join(match.missing_skills) if match.missing_skills else "No obvious gaps detected."
         reasons_text = "\n".join(match.reasons)
         matched_summary = f"{len(match.matched_skills)} matched skill(s) - {match.embedding_score * 100:.0f}% semantic fit"
+        type_display, salary_display = JobMatchUI._display_type_and_salary(match.job.job_type, match.job.salary_text, match.job.employment_text)
         return {
             "id": match.job_id,
             "score_value": round(match.score, 4),
@@ -1680,8 +1770,8 @@ class JobMatchUI:
             "company": match.job.company,
             "location": match.job.location or "Unspecified",
             "remote_mode": match.job.remote_mode,
-            "job_type": match.job.job_type or "unspecified",
-            "salary_text": match.job.salary_text or "",
+            "job_type": type_display,
+            "salary_text": salary_display,
             "matched_summary": matched_summary,
             "matched_skills": matched_skills,
             "missing_skills": missing_skills,
@@ -1692,6 +1782,27 @@ class JobMatchUI:
             "source_name": match.job.source_name,
             "description": clipped_excerpt(match.job.description, 1200),
         }
+
+    @staticmethod
+    def _display_type_and_salary(job_type: str | None, salary_text: str | None, employment_text: str | None) -> tuple[str, str]:
+        parsed_salary = extract_salary_info(salary_text or "").get("display") if salary_text else None
+        type_parts: list[str] = []
+        seen: set[str] = set()
+        for value in [job_type or "", employment_text or ""]:
+            normalized = normalize_whitespace(value)
+            if not normalized:
+                continue
+            folded = normalized.casefold()
+            if folded in seen:
+                continue
+            seen.add(folded)
+            type_parts.append(normalized)
+        if salary_text and not parsed_salary:
+            normalized_salary = normalize_whitespace(salary_text)
+            if normalized_salary and normalized_salary.casefold() not in seen:
+                type_parts.append(normalized_salary)
+        type_display = " | ".join(type_parts) if type_parts else "unspecified"
+        return type_display, parsed_salary or ""
 
     @staticmethod
     def _stat_block(label: str, value: str) -> None:

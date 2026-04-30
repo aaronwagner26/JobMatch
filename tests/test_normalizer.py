@@ -115,3 +115,23 @@ def test_job_normalizer_preserves_explicit_salary_field_when_description_is_spar
     assert "Windows Server" in job.skills or "VMware" in job.skills
     assert job.salary_text == "$120,000/yr"
     assert job.salary_min == 120000.0
+
+
+def test_job_normalizer_moves_non_salary_fragments_into_employment_text() -> None:
+    source = JobSourceConfig(id=1, name="Example Board", source_type="custom_url", url="https://example.com/jobs")
+    job = JobNormalizer().normalize(
+        source,
+        {
+            "raw_id": "job-1000",
+            "title": "Operations Specialist",
+            "company": "Example Co",
+            "location": "Remote",
+            "summary": "Support role with scheduling coverage",
+            "salary_text": "Full-time",
+            "url": "https://example.com/jobs/job-1000",
+        },
+    )
+
+    assert job.salary_text is None
+    assert job.job_type == "full-time"
+    assert job.employment_text == "Full-time"

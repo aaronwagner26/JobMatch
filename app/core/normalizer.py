@@ -38,6 +38,8 @@ class JobNormalizer:
         company = normalize_whitespace(payload.get("company") or source.name)
         location = normalize_whitespace(payload.get("location"))
         description = normalize_whitespace(payload.get("description") or payload.get("summary") or "")
+        raw_salary_text = normalize_whitespace(str(payload.get("salary_text") or ""))
+        raw_employment_text = normalize_whitespace(str(payload.get("employment_text") or ""))
         if not title:
             raise ValueError("Job payload is missing a title.")
 
@@ -48,7 +50,9 @@ class JobNormalizer:
         preferred_skills = extract_skills(preferred_text)
         all_skills = extract_skills(combined_text)
         remote_mode = payload.get("remote_mode") or detect_remote_mode(f"{location} {description}")
-        job_type = payload.get("job_type") or detect_job_type(f"{title} {description}")
+        job_type = payload.get("job_type") or detect_job_type(
+            "\n".join(filter(None, [title, description, raw_employment_text, raw_salary_text]))
+        )
         clearance_info = extract_clearance_info(combined_text)
         clearance_terms = list(clearance_info["terms"])
         salary_info = extract_salary_info(
@@ -59,14 +63,14 @@ class JobNormalizer:
                         str(payload.get("salary_text") or ""),
                         str(payload.get("summary") or ""),
                         description,
-                        str(payload.get("employment_text") or ""),
+                        raw_employment_text,
                     ],
                 )
             )
         )
-        raw_salary_text = normalize_whitespace(str(payload.get("salary_text") or ""))
+        employment_text = raw_employment_text
         if raw_salary_text and not salary_info.get("display"):
-            salary_info["display"] = raw_salary_text
+            employment_text = self._merge_text_fragments(raw_employment_text, raw_salary_text)
         experience_years = self._extract_experience_years(required_text or description)
         llm_summary = ""
         if llm_enricher is not None:
@@ -166,7 +170,7 @@ class JobNormalizer:
             required_skills=required_skills,
             preferred_skills=preferred_skills,
             experience_years=experience_years,
-            employment_text=payload.get("employment_text") or "",
+            employment_text=employment_text,
             metadata=metadata,
             content_hash=text_hash(summary_text),
         )
@@ -224,3 +228,18 @@ class JobNormalizer:
         if right:
             values.extend(str(item) for item in right)
         return unique_sorted(values)
+
+    @staticmethod
+    def _merge_text_fragments(*values: str) -> str:
+        ordered: list[str] = []
+        seen: set[str] = set()
+        for value in values:
+            normalized = normalize_whitespace(value)
+            if not normalized:
+                continue
+            folded = normalized.casefold()
+            if folded in seen:
+                continue
+            seen.add(folded)
+            ordered.append(normalized)
+        return " | ".join(ordered)
