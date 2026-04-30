@@ -2,6 +2,16 @@
 
 Local, personal-use job matching tool built with Python, SQLite, and NiceGUI.
 
+## Current Direction
+
+JobMatch is now strongest as:
+
+- a local resume-aware matching engine
+- a local cache of captured job opportunities
+- a review dashboard for ranking, filtering, and exporting matches
+
+Direct scraping still exists for API-backed and simpler boards, but protected sites are better handled through the browser capture extension in `browser_extension/`.
+
 ## Run
 
 ```bash
@@ -56,3 +66,16 @@ python -m app.cli matches
 - Greenhouse and Lever use APIs first.
 - Custom, Indeed-style, and clearance-style pages fall back to scraping.
 - Dynamic pages can use Playwright when enabled on the source.
+
+## Browser Capture Extension
+
+The recommended ingestion path for LinkedIn, Indeed, and other dynamic pages is the bundled browser extension:
+
+1. Load `browser_extension/` as an unpacked Chrome or Edge extension
+2. Copy the browser capture token from `Settings` in JobMatch
+3. In the extension popup, set:
+   - the same JobMatch server URL you already use in the browser
+   - the browser capture token
+4. Open a jobs page and click `Capture visible jobs`
+
+Captured jobs are stored in JobMatch as `browser_capture` sources. These sources are manual-only and are skipped by the scheduler.

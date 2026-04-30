@@ -3,10 +3,12 @@ from __future__ import annotations
 import asyncio
 import csv
 import json
+import secrets
 from dataclasses import replace
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from app.core.job_fetcher import JobFetcher
 from app.core.matcher import JobMatcher
@@ -25,7 +27,7 @@ from app.core.types import (
 )
 from app.db.storage import Storage
 from app.utils.config import DEFAULT_SCAN_CONCURRENCY, DEFAULT_SETTINGS, EXPORTS_DIR, UPLOADS_DIR, ensure_directories
-from app.utils.text import canonical_job_key, safe_filename, sanitize_source_url
+from app.utils.text import canonical_job_key, normalize_whitespace, safe_filename, sanitize_source_url
 
 
 class JobMatchEngine:
@@ -60,7 +62,9 @@ class JobMatchEngine:
 
     def save_source(self, payload: JobSourceConfig) -> JobSourceConfig:
         payload.url = sanitize_source_url(payload.url, payload.source_type)
-        unsupported_reason = self.job_fetcher.unsupported_source_reason(payload)
+        unsupported_reason = None
+        if payload.source_type != "browser_capture":
+            unsupported_reason = self.job_fetcher.unsupported_source_reason(payload)
         if unsupported_reason:
             raise ValueError(unsupported_reason)
         return self.storage.upsert_source(payload)
@@ -87,11 +91,31 @@ class JobMatchEngine:
     def delete_source(self, source_id: int) -> None:
         self.storage.delete_source(source_id)
 
+    def list_scanable_sources(self) -> list[JobSourceConfig]:
+        return [
+            source
+            for source in self.storage.list_sources()
+            if source.enabled and self.job_fetcher.determine_source_type(source) != "browser_capture"
+        ]
+
     def get_settings(self) -> dict:
         return self.storage.get_settings()
 
     def update_settings(self, values: dict) -> None:
         self.storage.update_settings(values)
+
+    def get_browser_api_token(self) -> str:
+        token = str(self.storage.get_setting("browser_api_token", "") or "")
+        if token:
+            return token
+        token = secrets.token_urlsafe(24)
+        self.storage.set_setting("browser_api_token", token)
+        return token
+
+    def rotate_browser_api_token(self) -> str:
+        token = secrets.token_urlsafe(24)
+        self.storage.set_setting("browser_api_token", token)
+        return token
 
     def clear_scan_results(self) -> None:
         if self._scan_lock.locked():
@@ -109,7 +133,61 @@ class JobMatchEngine:
 
     def is_manual_assist_source(self, source: JobSourceConfig) -> bool:
         source_type = self.job_fetcher.determine_source_type(source)
-        return source.use_browser_profile or source_type == "indeed"
+        return source_type == "browser_capture" or source.use_browser_profile or source_type == "indeed"
+
+    def import_browser_capture(self, payload: dict[str, object]) -> dict[str, object]:
+        jobs_payload = payload.get("jobs")
+        if not isinstance(jobs_payload, list) or not jobs_payload:
+            raise ValueError("Browser capture did not include any jobs.")
+
+        page = payload.get("page") if isinstance(payload.get("page"), dict) else {}
+        source_meta = payload.get("source") if isinstance(payload.get("source"), dict) else {}
+        page_url = sanitize_source_url(
+            str(
+                (page or {}).get("url")
+                or (source_meta or {}).get("url")
+                or (payload.get("page_url") if isinstance(payload.get("page_url"), str) else "")
+            ),
+            "browser_capture",
+        )
+        if not page_url:
+            raise ValueError("Browser capture is missing the page URL.")
+
+        source = self._resolve_browser_capture_source(page_url, page or {}, source_meta or {}, jobs_payload)
+        normalized_jobs = []
+        for item in jobs_payload:
+            if not isinstance(item, dict):
+                continue
+            prepared = self._prepare_browser_capture_payload(source, item, page or {}, page_url, payload)
+            try:
+                normalized_jobs.append(self.job_fetcher.normalizer.normalize(source, prepared))
+            except Exception:
+                continue
+
+        if not normalized_jobs:
+            raise ValueError("No usable jobs were found in the browser capture.")
+
+        scan_id = self.storage.begin_scan(source.id)
+        created, updated, unchanged = self.storage.merge_jobs(source, normalized_jobs)
+        self.storage.update_source_scan_state(source.id or 0, status="browser_capture")
+        self.storage.finish_scan(
+            scan_id,
+            status="browser_capture",
+            jobs_found=len(normalized_jobs),
+            jobs_created=created,
+            jobs_updated=updated,
+            jobs_unchanged=unchanged,
+            jobs_deactivated=0,
+        )
+        return {
+            "source_id": source.id,
+            "source_name": source.name,
+            "source_url": source.url,
+            "jobs_imported": len(normalized_jobs),
+            "jobs_created": created,
+            "jobs_updated": updated,
+            "jobs_unchanged": unchanged,
+        }
 
     def open_source_in_browser_profile(self, source_id: int) -> str:
         source = self.storage.get_source(source_id)
@@ -167,7 +245,7 @@ class JobMatchEngine:
     ) -> ScanSummary:
         async with self._scan_lock:
             self._scan_cancel_requested.clear()
-            sources = [source for source in self.storage.list_sources() if source.enabled]
+            sources = self.list_scanable_sources()
             if source_ids:
                 sources = [source for source in sources if source.id in source_ids]
             started_at = datetime.now(UTC)
@@ -394,6 +472,104 @@ class JobMatchEngine:
             jobs_deactivated=0,
         )
         return result
+
+    def _resolve_browser_capture_source(
+        self,
+        page_url: str,
+        page: dict[str, object],
+        source_meta: dict[str, object],
+        jobs_payload: list[object],
+    ) -> JobSourceConfig:
+        source_id = source_meta.get("id")
+        if isinstance(source_id, int):
+            existing = self.storage.get_source(source_id)
+            if existing is not None:
+                return existing
+
+        existing = self.storage.find_source_by_url(page_url, source_type="browser_capture")
+        if existing is not None:
+            return existing
+
+        company = normalize_whitespace(
+            str(source_meta.get("company") or self._first_company_from_jobs(jobs_payload) or "")
+        )
+        site_name = normalize_whitespace(str(source_meta.get("site") or page.get("site") or self._host_label(page_url)))
+        page_title = normalize_whitespace(str(page.get("title") or ""))
+        source_name = normalize_whitespace(
+            str(source_meta.get("name") or self._browser_capture_source_name(company, site_name, page_title))
+        )
+        notes = normalize_whitespace(
+            f"Managed by browser capture from {site_name}. Refresh this source from the extension instead of Scan now."
+        )
+        return self.storage.upsert_source(
+            JobSourceConfig(
+                id=None,
+                name=source_name,
+                source_type="browser_capture",
+                url=page_url,
+                enabled=True,
+                refresh_minutes=180,
+                max_pages=1,
+                request_delay_ms=0,
+                notes=notes,
+            )
+        )
+
+    def _prepare_browser_capture_payload(
+        self,
+        source: JobSourceConfig,
+        item: dict[str, object],
+        page: dict[str, object],
+        page_url: str,
+        root_payload: dict[str, object],
+    ) -> dict[str, object]:
+        payload = dict(item)
+        payload["url"] = sanitize_source_url(str(item.get("url") or page_url), "browser_capture")
+        payload["company"] = normalize_whitespace(str(item.get("company") or source.name))
+        payload["title"] = normalize_whitespace(str(item.get("title") or ""))
+        payload["location"] = normalize_whitespace(str(item.get("location") or ""))
+        payload["summary"] = normalize_whitespace(str(item.get("summary") or ""))
+        payload["description"] = normalize_whitespace(str(item.get("description") or payload["summary"] or ""))
+        payload["employment_text"] = normalize_whitespace(str(item.get("employment_text") or ""))
+        metadata = dict(item.get("metadata") or {}) if isinstance(item.get("metadata"), dict) else {}
+        metadata.update(
+            {
+                "capture_mode": "browser_extension",
+                "captured_page_url": page_url,
+                "captured_page_title": normalize_whitespace(str(page.get("title") or "")),
+                "captured_site": normalize_whitespace(str(page.get("site") or "")),
+                "capture_parser": normalize_whitespace(str(root_payload.get("parser") or page.get("parser") or "")),
+            }
+        )
+        payload["metadata"] = metadata
+        if not payload.get("raw_id"):
+            payload["raw_id"] = payload["url"]
+        return payload
+
+    @staticmethod
+    def _browser_capture_source_name(company: str, site_name: str, page_title: str) -> str:
+        label = company or page_title or site_name or "Captured Jobs"
+        if site_name and company:
+            return f"Capture: {company} ({site_name})"
+        return f"Capture: {label}"
+
+    @staticmethod
+    def _first_company_from_jobs(jobs_payload: list[object]) -> str:
+        for item in jobs_payload:
+            if not isinstance(item, dict):
+                continue
+            company = normalize_whitespace(str(item.get("company") or ""))
+            if company:
+                return company
+        return ""
+
+    @staticmethod
+    def _host_label(url: str) -> str:
+        host = urlsplit(url).netloc.casefold()
+        labels = [label for label in host.split(".") if label and label not in {"www", "jobs", "careers"}]
+        if not labels:
+            return host or "Captured Jobs"
+        return labels[0].replace("-", " ").title()
 
     def _get_matcher(self, model_name: str, weights: MatchWeights) -> JobMatcher:
         normalized = weights.normalized()

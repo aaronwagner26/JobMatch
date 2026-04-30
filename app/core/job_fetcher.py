@@ -87,8 +87,7 @@ class JobFetcher:
         return self._determine_source_type(source)
 
     def unsupported_source_reason(self, source: JobSourceConfig | str) -> str | None:
-        url = source.url if isinstance(source, JobSourceConfig) else source
-        return self._unsupported_source_reason(url)
+        return self._unsupported_source_reason(source)
 
     def open_source_in_browser_profile(self, source: JobSourceConfig) -> str:
         browser_source = source if source.use_browser_profile else replace(source, use_browser_profile=True)
@@ -122,7 +121,7 @@ class JobFetcher:
         source_type = self._determine_source_type(source)
         source.source_type = source_type
         source.url = sanitize_source_url(source.url, source_type)
-        unsupported_reason = self._unsupported_source_reason(source.url)
+        unsupported_reason = self._unsupported_source_reason(source)
         if unsupported_reason:
             raise ValueError(unsupported_reason)
         html = await self._capture_source_page_html(source, parser=self._parser_name_for_source_type(source_type))
@@ -139,9 +138,6 @@ class JobFetcher:
         source_type = self._determine_source_type(source)
         source.source_type = source_type
         source.url = sanitize_source_url(source.url, source_type)
-        unsupported_reason = self._unsupported_source_reason(source.url)
-        if unsupported_reason:
-            raise ValueError(unsupported_reason)
         jobs = self._normalize_payloads(
             source,
             self._manual_prepared_payloads(source, html_text, known_jobs=None),
@@ -153,7 +149,7 @@ class JobFetcher:
         source_type = self._determine_source_type(source)
         source.source_type = source_type
         source.url = sanitize_source_url(source.url, source_type)
-        unsupported_reason = self._unsupported_source_reason(source.url)
+        unsupported_reason = self._unsupported_source_reason(source)
         if unsupported_reason:
             raise ValueError(unsupported_reason)
         throttle = SourceThrottle(source.request_delay_ms)
@@ -196,7 +192,7 @@ class JobFetcher:
         source_type = self._determine_source_type(source)
         source.source_type = source_type
         source.url = sanitize_source_url(source.url, source_type)
-        unsupported_reason = self._unsupported_source_reason(source.url)
+        unsupported_reason = self._unsupported_source_reason(source)
         if unsupported_reason:
             return ScanResult(source=source, status="error", error=unsupported_reason)
         throttle = SourceThrottle(source.request_delay_ms)
@@ -1437,7 +1433,15 @@ class JobFetcher:
         return {}, None
 
     @staticmethod
-    def _unsupported_source_reason(url: str) -> str | None:
+    def _unsupported_source_reason(source: JobSourceConfig | str) -> str | None:
+        if isinstance(source, JobSourceConfig):
+            source_type = source.source_type
+            url = source.url
+        else:
+            source_type = ""
+            url = source
+        if source_type == "browser_capture":
+            return "This source is browser-capture only. Refresh it from the browser extension instead of Scan now."
         host = urlsplit(url).netloc.casefold()
         if host.endswith("linkedin.com"):
             return (

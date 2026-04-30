@@ -8,6 +8,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from fastapi import HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from nicegui import app, events, ui
 
 from app.core.engine import JobMatchEngine
@@ -26,6 +28,15 @@ from app.utils.skills import CLEARANCE_PATTERNS
 from app.utils.text import clipped_excerpt, safe_filename
 
 configure_logging()
+
+if not getattr(app.state, "jobmatch_cors_enabled", False):
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=["*"],
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+    app.state.jobmatch_cors_enabled = True
 
 app.colors(
     primary="#0f766e",
@@ -142,6 +153,43 @@ ui.add_css(
 ENGINE = JobMatchEngine()
 
 
+def _request_token(request: Request, payload: dict[str, Any]) -> str:
+    auth = request.headers.get("authorization", "")
+    if auth.lower().startswith("bearer "):
+        return auth[7:].strip()
+    header_token = request.headers.get("x-jobmatch-token", "").strip()
+    if header_token:
+        return header_token
+    body_token = payload.get("token")
+    return str(body_token or "").strip()
+
+
+@app.get("/api/browser-capture/status")
+async def browser_capture_status() -> dict[str, Any]:
+    return {
+        "ok": True,
+        "app": APP_NAME,
+        "capture_endpoint": "/api/browser-capture",
+        "token_required": True,
+    }
+
+
+@app.post("/api/browser-capture")
+async def browser_capture_import(request: Request) -> dict[str, Any]:
+    payload = await request.json()
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="Capture payload must be a JSON object.")
+    token = _request_token(request, payload)
+    if token != ENGINE.get_browser_api_token():
+        raise HTTPException(status_code=401, detail="Invalid browser capture token.")
+    try:
+        return await asyncio.to_thread(ENGINE.import_browser_capture, payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 @dataclass(slots=True)
 class UIState:
     current_view: str = "dashboard"
@@ -202,6 +250,7 @@ class JobMatchUI:
         self._background_tasks: list[asyncio.Task] = []
         self.source_inputs: dict[str, Any] = {}
         self.settings_inputs: dict[str, Any] = {}
+        self.browser_token_input = None
 
     def mount(self) -> None:
         self.client = ui.context.client
@@ -518,9 +567,12 @@ class JobMatchUI:
                     if selected_source:
                         ui.label(f"Editing source #{selected_source.id}").classes("mt-3 text-sm muted-copy")
                         if manual_assist:
-                            ui.label(
-                                "This source is treated as manual-assist and is excluded from periodic refresh."
-                            ).classes("mt-2 muted-copy text-sm")
+                            helper_copy = "This source is treated as manual-assist and is excluded from periodic refresh."
+                            if selected_source.source_type == "browser_capture":
+                                helper_copy = (
+                                    "This source is managed by browser capture. Refresh it from the extension instead of Scan now."
+                                )
+                            ui.label(helper_copy).classes("mt-2 muted-copy text-sm")
                         ui.separator().classes("my-4")
                         with ui.row().classes("w-full gap-2 items-center"):
                             ui.button("Open In Browser", icon="open_in_new", on_click=self.open_selected_source_browser).props(
@@ -586,6 +638,7 @@ class JobMatchUI:
 
     def render_settings(self) -> None:
         settings = self.engine.get_settings()
+        browser_token = self.engine.get_browser_api_token()
         with ui.column().classes("w-full gap-4"):
             with ui.row().classes("w-full items-end justify-between"):
                 with ui.column().classes("gap-1"):
@@ -639,6 +692,24 @@ class JobMatchUI:
                         step=0.01,
                     ).props("outlined").classes("w-full mt-3")
                     ui.label("Weights are normalized automatically, so they do not need to sum to 1.0.").classes("mt-3 muted-copy")
+
+                with ui.element("section").classes("panel"):
+                    ui.label("Browser Capture").classes("text-lg font-semibold")
+                    ui.label(
+                        "Use the extension on the pages you actually browse, then send visible jobs into this local app."
+                    ).classes("mt-1 page-subtitle")
+                    ui.input("Extension server URL", value="Use the same JobMatch URL you already opened").props(
+                        "outlined readonly"
+                    ).classes("w-full mt-3")
+                    ui.input("Capture endpoint path", value="/api/browser-capture").props("outlined readonly").classes("w-full mt-3")
+                    self.browser_token_input = ui.input("Extension token", value=browser_token).props("outlined readonly").classes(
+                        "w-full mt-3"
+                    )
+                    with ui.row().classes("w-full gap-2 mt-3"):
+                        ui.button("Rotate token", icon="autorenew", on_click=self.rotate_browser_api_token).props("flat")
+                    ui.label(
+                        "The extension folder lives in browser_extension/. Browser-capture sources are manual-only and skipped by the scheduler."
+                    ).classes("mt-3 muted-copy text-sm")
 
     def render_scan_summary_panel(self) -> None:
         if self._client_deleted or self.scan_summary_panel is None:
@@ -749,6 +820,14 @@ class JobMatchUI:
             return
         if self.state.scan_running:
             self._append_activity("Scan request ignored because a scan is already running.")
+            self.render_scan_log_panel()
+            return
+        if not self.engine.list_scanable_sources():
+            self._append_activity("Scan skipped because all enabled sources are browser-capture only.")
+            self._notify(
+                "No scanable sources are enabled. Browser-capture sources are refreshed from the extension.",
+                type="warning",
+            )
             self.render_scan_log_panel()
             return
         if self.scan_button:
@@ -957,6 +1036,13 @@ class JobMatchUI:
         values = {key: element.value for key, element in self.settings_inputs.items()}
         self.engine.update_settings(values)
         self._notify("Settings saved.", type="positive")
+
+    def rotate_browser_api_token(self) -> None:
+        token = self.engine.rotate_browser_api_token()
+        if self.browser_token_input is not None:
+            self.browser_token_input.value = token
+            self.browser_token_input.update()
+        self._notify("Rotated the browser capture token.", type="positive")
 
     async def handle_source_discovery(self) -> None:
         query = self.state.discovery_query.strip()

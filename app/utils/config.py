@@ -28,6 +28,7 @@ DEFAULT_BROWSER_CHALLENGE_WAIT_SECONDS = 75
 
 SOURCE_TYPES = [
     "auto",
+    "browser_capture",
     "greenhouse",
     "lever",
     "indeed",

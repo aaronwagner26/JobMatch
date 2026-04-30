@@ -118,6 +118,14 @@ class Storage:
             record = session.get(SourceRecord, source_id)
             return self._source_from_record(record) if record else None
 
+    def find_source_by_url(self, url: str, *, source_type: str | None = None) -> JobSourceConfig | None:
+        with self.session() as session:
+            query = select(SourceRecord).where(SourceRecord.url == url)
+            if source_type is not None:
+                query = query.where(SourceRecord.source_type == source_type)
+            record = session.scalar(query.order_by(SourceRecord.id.desc()))
+            return self._source_from_record(record) if record else None
+
     def upsert_source(self, payload: JobSourceConfig) -> JobSourceConfig:
         with self.session() as session:
             record = session.get(SourceRecord, payload.id) if payload.id else None

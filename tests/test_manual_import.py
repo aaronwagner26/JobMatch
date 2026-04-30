@@ -124,3 +124,52 @@ def test_clear_scan_results_resets_cached_jobs_and_scan_state() -> None:
     assert cleared_source.last_modified is None
     assert cleared_source.last_scan_at is None
     assert cleared_source.last_status is None
+
+
+def test_browser_capture_import_creates_manual_only_source_and_merges_jobs() -> None:
+    storage = Storage("sqlite+pysqlite:///:memory:")
+    engine = JobMatchEngine(storage=storage)
+    payload = {
+        "parser": "linkedin_company",
+        "page": {
+            "url": "https://www.linkedin.com/company/netflix/jobs",
+            "title": "Netflix Jobs | LinkedIn",
+            "site": "LinkedIn",
+        },
+        "source": {
+            "company": "Netflix",
+            "site": "LinkedIn",
+        },
+        "jobs": [
+            {
+                "raw_id": "123",
+                "title": "Site Reliability Engineer",
+                "company": "Netflix",
+                "location": "Los Gatos, CA",
+                "summary": "Python, AWS, and distributed systems",
+                "url": "https://www.linkedin.com/jobs/view/123/",
+            },
+            {
+                "raw_id": "456",
+                "title": "Platform Engineer",
+                "company": "Netflix",
+                "location": "Remote",
+                "summary": "Kubernetes and Terraform",
+                "url": "https://www.linkedin.com/jobs/view/456/",
+            },
+        ],
+    }
+
+    first = engine.import_browser_capture(payload)
+    second = engine.import_browser_capture(payload)
+
+    assert first["jobs_imported"] == 2
+    assert first["jobs_created"] == 2
+    assert second["jobs_unchanged"] == 2
+    sources = engine.list_sources()
+    assert len(sources) == 1
+    assert sources[0].source_type == "browser_capture"
+    assert engine.is_manual_assist_source(sources[0]) is True
+    jobs = storage.list_jobs()
+    assert len(jobs) == 2
+    assert {job.company for job in jobs} == {"Netflix"}

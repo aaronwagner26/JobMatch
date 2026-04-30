@@ -1,0 +1,112 @@
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 360px;
+  background: #0f172a;
+  color: #e2e8f0;
+  font: 14px/1.45 "IBM Plex Sans", "Segoe UI", sans-serif;
+}
+
+.shell {
+  padding: 16px;
+}
+
+.header h1 {
+  margin: 4px 0 6px;
+  font-size: 20px;
+}
+
+.header p {
+  margin: 0 0 16px;
+  color: #94a3b8;
+}
+
+.eyebrow {
+  color: #5eead4;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.field {
+  display: block;
+  margin-bottom: 12px;
+}
+
+.field span {
+  display: block;
+  margin-bottom: 6px;
+  color: #cbd5e1;
+  font-size: 12px;
+}
+
+.field input {
+  width: 100%;
+  border: 1px solid #334155;
+  border-radius: 10px;
+  background: #111827;
+  color: #f8fafc;
+  padding: 10px 12px;
+  outline: none;
+}
+
+.field input:focus {
+  border-color: #14b8a6;
+}
+
+.actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  margin: 16px 0;
+}
+
+button {
+  border: 0;
+  border-radius: 10px;
+  cursor: pointer;
+  font: inherit;
+  padding: 10px 12px;
+}
+
+button:disabled {
+  cursor: wait;
+  opacity: 0.7;
+}
+
+.primary {
+  background: #0f766e;
+  color: #f8fafc;
+}
+
+.secondary {
+  background: #1e293b;
+  color: #e2e8f0;
+}
+
+.status-shell {
+  border: 1px solid #334155;
+  border-radius: 12px;
+  background: #111827;
+  padding: 12px;
+}
+
+.status-label {
+  color: #94a3b8;
+  font-size: 12px;
+  margin-bottom: 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.status {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: #e2e8f0;
+  font: 12px/1.45 "IBM Plex Mono", "Consolas", monospace;
+}

@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>JobMatch Capture</title>
+    <link rel="stylesheet" href="popup.css">
+  </head>
+  <body>
+    <main class="shell">
+      <header class="header">
+        <div class="eyebrow">JobMatch</div>
+        <h1>Browser Capture</h1>
+        <p>Send visible jobs from the current page into your local matching workspace.</p>
+      </header>
+
+      <label class="field">
+        <span>JobMatch server URL</span>
+        <input id="serverUrl" type="url" placeholder="http://127.0.0.1:8181">
+      </label>
+
+      <label class="field">
+        <span>Browser capture token</span>
+        <input id="token" type="text" placeholder="Paste the token from JobMatch Settings">
+      </label>
+
+      <div class="actions">
+        <button id="testButton" class="secondary" type="button">Test connection</button>
+        <button id="captureButton" class="primary" type="button">Capture visible jobs</button>
+      </div>
+
+      <section class="status-shell">
+        <div class="status-label">Status</div>
+        <pre id="status" class="status">Ready.</pre>
+      </section>
+    </main>
+
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

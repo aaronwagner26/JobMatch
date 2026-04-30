@@ -363,6 +363,22 @@ def test_scan_source_rejects_linkedin_company_jobs_pages() -> None:
     assert request_attempted is False
 
 
+def test_scan_source_rejects_browser_capture_sources() -> None:
+    source = JobSourceConfig(
+        id=11,
+        name="Capture: Netflix (LinkedIn)",
+        source_type="browser_capture",
+        url="https://www.linkedin.com/company/netflix/jobs",
+        request_delay_ms=0,
+    )
+    fetcher = JobFetcher(JobNormalizer())
+
+    result = asyncio.run(fetcher.scan_source(source, max_jobs=20, known_jobs={}))
+
+    assert result.status == "error"
+    assert "browser-capture only" in (result.error or "")
+
+
 def test_indeed_detail_enrichment_skips_browser_fallback_after_block() -> None:
     source = JobSourceConfig(
         id=7,
