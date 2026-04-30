@@ -46,6 +46,7 @@ async function testConnection() {
 async function captureVisibleJobs() {
   setBusy(true);
   try {
+    setStatus('Capturing visible jobs from the current page.\nWalking visible result details when available...');
     const { serverUrl, token } = await saveConfig();
     if (!token) {
       throw new Error('Enter the browser capture token from JobMatch Settings first.');

@@ -1,20 +1,26 @@
+const DETAIL_CAPTURE_LIMIT = 24;
+const DETAIL_CAPTURE_TIMEOUT_MS = 5000;
+const DETAIL_CAPTURE_POLL_MS = 175;
+
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
   if (message?.type !== 'jobmatch_capture_page') {
     return undefined;
   }
 
-  try {
-    sendResponse({ ok: true, payload: captureCurrentPage() });
-  } catch (error) {
-    sendResponse({
-      ok: false,
-      error: error instanceof Error ? error.message : String(error),
-    });
-  }
+  void (async () => {
+    try {
+      sendResponse({ ok: true, payload: await captureCurrentPage() });
+    } catch (error) {
+      sendResponse({
+        ok: false,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  })();
   return true;
 });
 
-function captureCurrentPage() {
+async function captureCurrentPage() {
   const host = location.hostname.toLowerCase();
   if (host.endsWith('linkedin.com') && location.pathname.toLowerCase().includes('/company/') && location.pathname.toLowerCase().includes('/jobs')) {
     return captureLinkedInCompanyPage();
@@ -25,17 +31,32 @@ function captureCurrentPage() {
   return captureGenericPage();
 }
 
-function captureLinkedInCompanyPage() {
+async function captureLinkedInCompanyPage() {
   const company = firstText(document, [
     '.org-top-card-summary__title',
     '.job-details-jobs-unified-top-card__company-name',
     '.jobs-company__name',
     'h1',
   ]);
-  const detail = captureLinkedInSelectedDetail();
-  const cards = Array.from(
-    document.querySelectorAll('[data-job-id], li.jobs-search-results__list-item, li.scaffold-layout__list-item')
+  const cards = uniqueNodes(
+    Array.from(document.querySelectorAll('[data-job-id], li.jobs-search-results__list-item, li.scaffold-layout__list-item'))
+      .filter((card) => isVisible(card))
   );
+  const detailMap = await captureVisibleResultDetails(cards, {
+    getRawId: (card) => normalizeText(card.getAttribute('data-job-id') || firstNode(card, [
+      'a[href*="/jobs/view/"]',
+      'a.job-card-list__title',
+      'a.job-card-container__link',
+    ])?.getAttribute('data-job-id') || ''),
+    getClickTarget: (card) => firstNode(card, [
+      'a[href*="/jobs/view/"]',
+      'a.job-card-list__title',
+      'a.job-card-container__link',
+      '[data-job-id]',
+    ]) || card,
+    captureDetail: (rawId) => captureLinkedInSelectedDetail(rawId),
+  });
+  const detail = captureLinkedInSelectedDetail();
   const jobs = uniqueJobs(cards.map((card) => {
     const anchor = firstNode(card, [
       'a[href*="/jobs/view/"]',
@@ -44,13 +65,13 @@ function captureLinkedInCompanyPage() {
     ]);
     const url = absoluteUrl(anchor?.href || '');
     const rawId = card.getAttribute('data-job-id') || anchor?.getAttribute('data-job-id') || jobIdFromUrl(url);
-    const selected = detail && rawId && detail.raw_id === rawId ? detail : null;
+    const selected = detailMap.get(rawId) || (detail && rawId && detail.raw_id === rawId ? detail : null);
     return {
       raw_id: rawId || url,
       title: firstText(card, ['.job-card-list__title', '.job-card-container__link', 'strong']) || selected?.title || text(anchor),
       company: company || selected?.company || firstText(card, ['.artdeco-entity-lockup__subtitle', '.job-card-container__company-name']),
       location: firstText(card, ['.job-card-container__metadata-item', '.artdeco-entity-lockup__caption']) || selected?.location || '',
-      summary: firstText(card, ['.job-card-container__footer-job-state', '.job-card-list__footer-wrapper']) || '',
+      summary: selected?.summary || firstText(card, ['.job-card-container__footer-job-state', '.job-card-list__footer-wrapper']) || '',
       description: selected?.description || '',
       url: selected?.url || url,
     };
@@ -58,7 +79,7 @@ function captureLinkedInCompanyPage() {
   return buildCapturePayload('linkedin_company', 'LinkedIn', company, jobs);
 }
 
-function captureLinkedInSelectedDetail() {
+function captureLinkedInSelectedDetail(rawIdHint = '') {
   const url = absoluteUrl(
     firstNode(document, [
       'a[href*="/jobs/view/"].job-details-jobs-unified-top-card__job-title-link',
@@ -66,7 +87,12 @@ function captureLinkedInSelectedDetail() {
       'a[href*="/jobs/view/"]',
     ])?.href || location.href
   );
-  const rawId = jobIdFromUrl(url) || jobIdFromUrl(location.href);
+  const description = firstText(document, [
+    '.jobs-description-content__text',
+    '.jobs-box__html-content',
+    '.jobs-description__content',
+  ]);
+  const rawId = jobIdFromUrl(url) || jobIdFromUrl(location.href) || normalizeText(rawIdHint);
   if (!rawId) {
     return null;
   }
@@ -85,18 +111,28 @@ function captureLinkedInSelectedDetail() {
       '.job-details-jobs-unified-top-card__primary-description-container',
       '.jobs-unified-top-card__primary-description',
     ]),
-    description: firstText(document, [
-      '.jobs-description-content__text',
-      '.jobs-box__html-content',
-      '.jobs-description__content',
-    ]),
+    summary: excerpt(description, 280),
+    description,
     url,
   };
 }
 
-function captureIndeedPage() {
+async function captureIndeedPage() {
+  const cards = uniqueNodes(
+    Array.from(document.querySelectorAll('[data-jk], [data-testid="slider_item"], a[href*="/viewjob"]'))
+      .map((node) => node.tagName === 'A' ? node.closest('[data-jk], [data-testid="slider_item"], article, li, div') || node : node)
+      .filter(Boolean)
+      .filter((node) => isVisible(node))
+  );
+  const detailMap = await captureVisibleResultDetails(cards, {
+    getRawId: (node) => {
+      const anchor = node.tagName === 'A' ? node : firstNode(node, ['a[href*="/viewjob"]', 'a[href*="jk="]', 'a[href*="/rc/clk"]', 'a[href*="/pagead/clk"]']);
+      return normalizeText(node?.getAttribute?.('data-jk') || anchor?.getAttribute?.('data-jk') || jobIdFromUrl(anchor?.href || ''));
+    },
+    getClickTarget: (node) => firstNode(node, ['a[href*="/viewjob"]', '[data-jk]']) || node,
+    captureDetail: (rawId) => captureIndeedSelectedDetail(rawId),
+  });
   const detail = captureIndeedSelectedDetail();
-  const cards = Array.from(document.querySelectorAll('[data-jk], [data-testid="slider_item"], a[href*="/viewjob"]'));
   if (cards.length === 0 && detail) {
     return buildCapturePayload('indeed_job', 'Indeed', detail.company || detail.title, [detail]);
   }
@@ -105,7 +141,7 @@ function captureIndeedPage() {
     const container = node.tagName === 'A' ? node.closest('[data-jk], [data-testid="slider_item"], article, li, div') || node : node;
     const rawId = normalizeText(container?.getAttribute?.('data-jk') || anchor?.getAttribute?.('data-jk') || jobIdFromUrl(anchor?.href || ''));
     const url = canonicalIndeedJobUrl(anchor?.href || '', rawId);
-    const selected = detail && rawId && detail.raw_id === rawId ? detail : null;
+    const selected = detailMap.get(rawId) || (detail && rawId && detail.raw_id === rawId ? detail : null);
     return {
       raw_id: rawId || url,
       title: text(anchor),
@@ -126,12 +162,13 @@ function captureIndeedPage() {
   return buildCapturePayload('indeed_search', 'Indeed', queryLabel, jobs);
 }
 
-function captureIndeedSelectedDetail() {
+function captureIndeedSelectedDetail(rawIdHint = '') {
   const jsonLdJobs = extractJsonLdJobs();
   const locationUrl = absoluteUrl(location.href);
   const rawId = normalizeText(
     jobIdFromUrl(locationUrl)
-    || firstNode(document, ['[data-jk][aria-current="true"]', '[data-jk][data-testid="slider_item"]'])?.getAttribute('data-jk')
+    || firstNode(document, ['[data-jk][aria-current="true"]', '[data-jk].resultContent-active', '[data-jk].job_seen_beacon'])?.getAttribute('data-jk')
+    || rawIdHint
     || ''
   );
   const title = firstText(document, [
@@ -329,6 +366,52 @@ function uniqueJobs(jobs) {
   return output;
 }
 
+async function captureVisibleResultDetails(cards, options) {
+  const detailMap = new Map();
+  for (const card of cards.slice(0, DETAIL_CAPTURE_LIMIT)) {
+    const rawId = normalizeText(options.getRawId(card) || '');
+    if (!rawId || detailMap.has(rawId)) {
+      continue;
+    }
+    const currentDetail = options.captureDetail(rawId);
+    if (currentDetail?.title && normalizeText(currentDetail.raw_id) === rawId) {
+      detailMap.set(rawId, currentDetail);
+      continue;
+    }
+    const clickTarget = options.getClickTarget(card);
+    if (!clickTarget) {
+      continue;
+    }
+    safeScrollIntoView(card);
+    const previousSignature = detailSignature(options.captureDetail());
+    clickElement(clickTarget);
+    const detail = await waitForDetailChange(rawId, previousSignature, options.captureDetail);
+    if (detail?.title) {
+      detailMap.set(rawId, detail);
+    }
+  }
+  return detailMap;
+}
+
+async function waitForDetailChange(rawId, previousSignature, captureDetail) {
+  const deadline = Date.now() + DETAIL_CAPTURE_TIMEOUT_MS;
+  while (Date.now() < deadline) {
+    await delay(DETAIL_CAPTURE_POLL_MS);
+    const detail = captureDetail(rawId);
+    if (!detail?.title) {
+      continue;
+    }
+    if (rawId && normalizeText(detail.raw_id) === normalizeText(rawId)) {
+      return detail;
+    }
+    const signature = detailSignature(detail);
+    if (signature && signature !== previousSignature) {
+      return detail;
+    }
+  }
+  return captureDetail(rawId);
+}
+
 function looksLikeJobUrl(url) {
   return /job|career|opening|position|posting|opportunit/i.test(url);
 }
@@ -504,4 +587,59 @@ function formatSalaryAmount(value) {
     return String(value);
   }
   return value.toFixed(2);
+}
+
+function uniqueNodes(nodes) {
+  const seen = new Set();
+  const output = [];
+  for (const node of nodes) {
+    if (!node || seen.has(node)) {
+      continue;
+    }
+    seen.add(node);
+    output.push(node);
+  }
+  return output;
+}
+
+function isVisible(node) {
+  if (!(node instanceof Element)) {
+    return false;
+  }
+  const style = window.getComputedStyle(node);
+  if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity) === 0) {
+    return false;
+  }
+  const rect = node.getBoundingClientRect();
+  return rect.width > 0 && rect.height > 0;
+}
+
+function safeScrollIntoView(node) {
+  try {
+    node.scrollIntoView({ block: 'center', inline: 'nearest', behavior: 'auto' });
+  } catch (_error) {
+    node.scrollIntoView();
+  }
+}
+
+function clickElement(node) {
+  node.dispatchEvent(new MouseEvent('mouseover', { bubbles: true, cancelable: true, view: window }));
+  node.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
+  node.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true, view: window }));
+  node.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
+}
+
+function detailSignature(detail) {
+  if (!detail) {
+    return '';
+  }
+  return normalizeText([
+    detail.raw_id || '',
+    detail.title || '',
+    excerpt(detail.description || detail.summary || '', 180),
+  ].join('|'));
+}
+
+function delay(ms) {
+  return new Promise((resolve) => window.setTimeout(resolve, ms));
 }

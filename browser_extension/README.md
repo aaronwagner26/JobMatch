@@ -13,6 +13,8 @@ Load this folder as an unpacked Chrome or Edge extension.
    - the browser capture token from JobMatch Settings
 6. Open a jobs page, then click `Capture visible jobs`
 
+On supported search pages, the extension now clicks through the visible result list and captures each visible detail pane before sending the batch to JobMatch. That is slower than a shallow list scrape, but it gives much better salary and requirement text.
+
 ## Supported first-pass page types
 
 - LinkedIn company jobs pages
