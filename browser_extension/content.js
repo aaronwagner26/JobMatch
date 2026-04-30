@@ -54,7 +54,7 @@ async function captureLinkedInCompanyPage() {
       'a.job-card-container__link',
       '[data-job-id]',
     ]) || card,
-    captureDetail: (rawId) => captureLinkedInSelectedDetail(rawId),
+    captureDetail: (rawId, options = {}) => captureLinkedInSelectedDetail(rawId, options),
   });
   const detail = captureLinkedInSelectedDetail();
   const jobs = uniqueJobs(cards.map((card) => {
@@ -79,7 +79,8 @@ async function captureLinkedInCompanyPage() {
   return buildCapturePayload('linkedin_company', 'LinkedIn', company, jobs);
 }
 
-function captureLinkedInSelectedDetail(rawIdHint = '') {
+function captureLinkedInSelectedDetail(rawIdHint = '', options = {}) {
+  const useHint = Boolean(options.useHint);
   const url = absoluteUrl(
     firstNode(document, [
       'a[href*="/jobs/view/"].job-details-jobs-unified-top-card__job-title-link',
@@ -92,7 +93,7 @@ function captureLinkedInSelectedDetail(rawIdHint = '') {
     '.jobs-box__html-content',
     '.jobs-description__content',
   ]);
-  const rawId = jobIdFromUrl(url) || jobIdFromUrl(location.href) || normalizeText(rawIdHint);
+  const rawId = jobIdFromUrl(url) || jobIdFromUrl(location.href) || (useHint ? normalizeText(rawIdHint) : '');
   if (!rawId) {
     return null;
   }
@@ -130,7 +131,7 @@ async function captureIndeedPage() {
       return normalizeText(node?.getAttribute?.('data-jk') || anchor?.getAttribute?.('data-jk') || jobIdFromUrl(anchor?.href || ''));
     },
     getClickTarget: (node) => firstNode(node, ['a[href*="/viewjob"]', '[data-jk]']) || node,
-    captureDetail: (rawId) => captureIndeedSelectedDetail(rawId),
+    captureDetail: (rawId, options = {}) => captureIndeedSelectedDetail(rawId, options),
   });
   const detail = captureIndeedSelectedDetail();
   if (cards.length === 0 && detail) {
@@ -162,13 +163,14 @@ async function captureIndeedPage() {
   return buildCapturePayload('indeed_search', 'Indeed', queryLabel, jobs);
 }
 
-function captureIndeedSelectedDetail(rawIdHint = '') {
+function captureIndeedSelectedDetail(rawIdHint = '', options = {}) {
+  const useHint = Boolean(options.useHint);
   const jsonLdJobs = extractJsonLdJobs();
   const locationUrl = absoluteUrl(location.href);
   const rawId = normalizeText(
     jobIdFromUrl(locationUrl)
     || firstNode(document, ['[data-jk][aria-current="true"]', '[data-jk].resultContent-active', '[data-jk].job_seen_beacon'])?.getAttribute('data-jk')
-    || rawIdHint
+    || (useHint ? rawIdHint : '')
     || ''
   );
   const title = firstText(document, [
@@ -373,7 +375,7 @@ async function captureVisibleResultDetails(cards, options) {
     if (!rawId || detailMap.has(rawId)) {
       continue;
     }
-    const currentDetail = options.captureDetail(rawId);
+    const currentDetail = options.captureDetail('', { useHint: false });
     if (currentDetail?.title && normalizeText(currentDetail.raw_id) === rawId) {
       detailMap.set(rawId, currentDetail);
       continue;
@@ -383,7 +385,7 @@ async function captureVisibleResultDetails(cards, options) {
       continue;
     }
     safeScrollIntoView(card);
-    const previousSignature = detailSignature(options.captureDetail());
+    const previousSignature = detailSignature(options.captureDetail('', { useHint: false }));
     clickElement(clickTarget);
     const detail = await waitForDetailChange(rawId, previousSignature, options.captureDetail);
     if (detail?.title) {
@@ -397,7 +399,7 @@ async function waitForDetailChange(rawId, previousSignature, captureDetail) {
   const deadline = Date.now() + DETAIL_CAPTURE_TIMEOUT_MS;
   while (Date.now() < deadline) {
     await delay(DETAIL_CAPTURE_POLL_MS);
-    const detail = captureDetail(rawId);
+    const detail = captureDetail('', { useHint: false });
     if (!detail?.title) {
       continue;
     }
@@ -406,10 +408,17 @@ async function waitForDetailChange(rawId, previousSignature, captureDetail) {
     }
     const signature = detailSignature(detail);
     if (signature && signature !== previousSignature) {
+      if (!normalizeText(detail.raw_id) && rawId) {
+        return { ...detail, raw_id: rawId };
+      }
       return detail;
     }
   }
-  return captureDetail(rawId);
+  const fallbackDetail = captureDetail(rawId, { useHint: true });
+  if (fallbackDetail?.title) {
+    return fallbackDetail;
+  }
+  return fallbackDetail;
 }
 
 function looksLikeJobUrl(url) {
