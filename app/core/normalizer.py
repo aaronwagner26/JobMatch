@@ -11,7 +11,15 @@ from app.utils.skills import (
     extract_salary_info,
     extract_skills,
 )
-from app.utils.text import canonical_job_url, clipped_excerpt, dt_to_iso, normalize_whitespace, parse_datetime, text_hash
+from app.utils.text import (
+    canonical_job_url,
+    clipped_excerpt,
+    dt_to_iso,
+    normalize_whitespace,
+    parse_datetime,
+    text_hash,
+    unique_sorted,
+)
 
 REQUIREMENT_SPLIT_RE = re.compile(
     r"(requirements|qualifications|must have|what you[' ]?ll need|what we[' ]?re looking for)",
@@ -25,7 +33,7 @@ YEARS_RE = re.compile(r"(\d+(?:\.\d+)?)\+?\s+years?", re.IGNORECASE)
 
 
 class JobNormalizer:
-    def normalize(self, source: JobSourceConfig, payload: dict) -> NormalizedJob:
+    def normalize(self, source: JobSourceConfig, payload: dict, *, llm_enricher=None) -> NormalizedJob:
         title = normalize_whitespace(payload.get("title"))
         company = normalize_whitespace(payload.get("company") or source.name)
         location = normalize_whitespace(payload.get("location"))
@@ -57,6 +65,43 @@ class JobNormalizer:
             )
         )
         experience_years = self._extract_experience_years(required_text or description)
+        llm_summary = ""
+        if llm_enricher is not None:
+            enrichment = llm_enricher.enrich_job(
+                title=title,
+                company=company,
+                location=location,
+                description=description or payload.get("summary") or "",
+                extracted={
+                    "required_skills": required_skills,
+                    "preferred_skills": preferred_skills,
+                    "skills": all_skills,
+                    "clearance_terms": clearance_terms,
+                    "salary_text": salary_info.get("display"),
+                    "experience_years": experience_years,
+                    "job_type": job_type,
+                    "remote_mode": remote_mode,
+                },
+            )
+            required_skills = self._merge_skill_lists(required_skills, enrichment.get("required_skills"))
+            preferred_skills = [
+                skill for skill in self._merge_skill_lists(preferred_skills, enrichment.get("preferred_skills")) if skill not in required_skills
+            ]
+            all_skills = self._merge_skill_lists(all_skills, enrichment.get("skills"))
+            clearance_terms = self._merge_string_lists(clearance_terms, enrichment.get("clearance_terms"))
+            if clearance_terms:
+                clearance_info["summary"] = ", ".join(clearance_terms)
+            if enrichment.get("salary_text") and not salary_info.get("display"):
+                salary_info = extract_salary_info(str(enrichment.get("salary_text") or ""))
+                if not salary_info.get("display"):
+                    salary_info["display"] = normalize_whitespace(str(enrichment.get("salary_text") or ""))
+            if enrichment.get("experience_years_hint"):
+                experience_years = max(experience_years or 0.0, float(enrichment["experience_years_hint"]))
+            if enrichment.get("job_type") and not job_type:
+                job_type = normalize_whitespace(str(enrichment.get("job_type")))
+            if enrichment.get("remote_mode") and remote_mode == "unknown":
+                remote_mode = normalize_whitespace(str(enrichment.get("remote_mode")))
+            llm_summary = normalize_whitespace(str(enrichment.get("short_summary") or ""))
         posted_at = parse_datetime(payload.get("posted_at"))
         external_id = self.derive_external_id(source, payload)
         listing_hash = payload.get("listing_hash") or self.build_listing_hash(source, payload)
@@ -74,6 +119,7 @@ class JobNormalizer:
                     f"Clearance: {clearance_info['summary']}" if clearance_info.get("summary") else "",
                     f"Required skills: {', '.join(required_skills[:16])}" if required_skills else "",
                     f"Preferred skills: {', '.join(preferred_skills[:16])}" if preferred_skills else "",
+                    f"LLM summary: {llm_summary}" if llm_summary else "",
                     clipped_excerpt(description, 900),
                 ],
             )
@@ -158,3 +204,20 @@ class JobNormalizer:
         if not matches:
             return None
         return max(matches)
+
+    @staticmethod
+    def _merge_skill_lists(left: list[str], right: list[str] | None) -> list[str]:
+        values: list[str] = []
+        values.extend(left)
+        if right:
+            values.extend(str(item) for item in right)
+        merged = unique_sorted(values)
+        return merged
+
+    @staticmethod
+    def _merge_string_lists(left: list[str], right: list[str] | None) -> list[str]:
+        values: list[str] = []
+        values.extend(left)
+        if right:
+            values.extend(str(item) for item in right)
+        return unique_sorted(values)

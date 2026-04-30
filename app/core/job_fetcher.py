@@ -118,6 +118,7 @@ class JobFetcher:
         *,
         known_jobs: dict[str, dict[str, Any]] | None = None,
         max_jobs: int = 120,
+        llm_enricher=None,
     ) -> ScanResult:
         source_type = self._determine_source_type(source)
         source.source_type = source_type
@@ -126,7 +127,12 @@ class JobFetcher:
         if unsupported_reason:
             raise ValueError(unsupported_reason)
         html = await self._capture_source_page_html(source, parser=self._parser_name_for_source_type(source_type))
-        jobs = self._normalize_payloads(source, self._manual_prepared_payloads(source, html, known_jobs), max_jobs=max_jobs)
+        jobs = self._normalize_payloads(
+            source,
+            self._manual_prepared_payloads(source, html, known_jobs),
+            max_jobs=max_jobs,
+            llm_enricher=llm_enricher,
+        )
         return ScanResult(source=source, status="manual_import", jobs=jobs, pages_scanned=1)
 
     def import_saved_html(
@@ -135,6 +141,7 @@ class JobFetcher:
         html_text: str,
         *,
         max_jobs: int = 120,
+        llm_enricher=None,
     ) -> ScanResult:
         source_type = self._determine_source_type(source)
         source.source_type = source_type
@@ -143,10 +150,11 @@ class JobFetcher:
             source,
             self._manual_prepared_payloads(source, html_text, known_jobs=None),
             max_jobs=max_jobs,
+            llm_enricher=llm_enricher,
         )
         return ScanResult(source=source, status="manual_import", jobs=jobs, pages_scanned=1)
 
-    async def import_job_urls(self, source: JobSourceConfig, urls: list[str]) -> ScanResult:
+    async def import_job_urls(self, source: JobSourceConfig, urls: list[str], *, llm_enricher=None) -> ScanResult:
         source_type = self._determine_source_type(source)
         source.source_type = source_type
         source.url = sanitize_source_url(source.url, source_type)
@@ -168,7 +176,9 @@ class JobFetcher:
                         payload = self._parse_job_detail_payload(html, sanitize_source_url(url, source_type), source)
                         if payload is None:
                             continue
-                        normalized_jobs.extend(self._normalize_payloads(source, [payload], max_jobs=1))
+                        normalized_jobs.extend(
+                            self._normalize_payloads(source, [payload], max_jobs=1, llm_enricher=llm_enricher)
+                        )
                 finally:
                     await context.close()
         else:
@@ -179,7 +189,9 @@ class JobFetcher:
                 payload = self._parse_job_detail_payload(html, sanitize_source_url(url, source_type), source)
                 if payload is None:
                     continue
-                normalized_jobs.extend(self._normalize_payloads(source, [payload], max_jobs=1))
+                normalized_jobs.extend(
+                    self._normalize_payloads(source, [payload], max_jobs=1, llm_enricher=llm_enricher)
+                )
         return ScanResult(source=source, status="manual_import", jobs=normalized_jobs, pages_scanned=len(urls))
 
     async def scan_source(
@@ -189,6 +201,7 @@ class JobFetcher:
         known_jobs: dict[str, dict[str, Any]] | None = None,
         progress_callback: Callable[[dict[str, Any]], None] | None = None,
         cancel_requested: Callable[[], bool] | None = None,
+        llm_enricher=None,
     ) -> ScanResult:
         source_type = self._determine_source_type(source)
         source.source_type = source_type
@@ -224,7 +237,7 @@ class JobFetcher:
             normalized_jobs: list[NormalizedJob] = []
             for payload in raw_jobs[:max_jobs]:
                 try:
-                    normalized_jobs.append(self.normalizer.normalize(source, payload))
+                    normalized_jobs.append(self.normalizer.normalize(source, payload, llm_enricher=llm_enricher))
                 except Exception as exc:
                     logger.warning("Skipping malformed job from %s: %s", source.name, exc)
             return ScanResult(
@@ -799,11 +812,12 @@ class JobFetcher:
         payloads: list[dict[str, Any]],
         *,
         max_jobs: int,
+        llm_enricher=None,
     ) -> list[NormalizedJob]:
         normalized_jobs: list[NormalizedJob] = []
         for payload in payloads[:max_jobs]:
             try:
-                normalized_jobs.append(self.normalizer.normalize(source, payload))
+                normalized_jobs.append(self.normalizer.normalize(source, payload, llm_enricher=llm_enricher))
             except Exception as exc:
                 logger.warning("Skipping malformed manual-import job from %s: %s", source.name, exc)
         return normalized_jobs

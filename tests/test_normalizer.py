@@ -51,3 +51,47 @@ def test_job_normalizer_does_not_flag_secret_without_clearance_context() -> None
     )
 
     assert job.clearance_terms == []
+
+
+def test_job_normalizer_merges_optional_llm_enrichment() -> None:
+    class FakeEnricher:
+        def enrich_job(self, *, title, company, location, description, extracted):  # noqa: ANN001
+            assert title == "Systems Engineer"
+            assert company == "Example Co"
+            assert location == "Remote"
+            assert extracted["skills"]
+            return {
+                "required_skills": ["PowerShell", "Active Directory"],
+                "preferred_skills": ["VMware"],
+                "skills": ["PowerShell", "Active Directory", "VMware"],
+                "clearance_terms": ["Secret"],
+                "salary_text": "$120,000 - $140,000 per year",
+                "job_type": "full-time",
+                "remote_mode": "remote",
+                "experience_years_hint": 6,
+                "short_summary": "Windows infrastructure role with endpoint and virtualization ownership.",
+            }
+
+    source = JobSourceConfig(id=1, name="Example Board", source_type="custom_url", url="https://example.com/jobs")
+    job = JobNormalizer().normalize(
+        source,
+        {
+            "raw_id": "job-789",
+            "title": "Systems Engineer",
+            "company": "Example Co",
+            "location": "Remote",
+            "description": (
+                "We need a systems engineer with Python and AWS experience. "
+                "Must have 5+ years experience."
+            ),
+            "url": "https://example.com/jobs/job-789",
+        },
+        llm_enricher=FakeEnricher(),
+    )
+
+    assert "PowerShell" in job.required_skills
+    assert "VMware" in job.preferred_skills
+    assert "Secret" in job.clearance_terms
+    assert job.salary_text == "$120,000 - $140,000/yr"
+    assert job.experience_years == 6.0
+    assert "LLM summary:" in job.summary_text

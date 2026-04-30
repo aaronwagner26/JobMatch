@@ -13,6 +13,7 @@ from urllib.parse import urlsplit
 from app.core.job_fetcher import JobFetcher
 from app.core.matcher import JobMatcher
 from app.core.normalizer import JobNormalizer
+from app.core.ollama_service import OllamaEnricher, OllamaStatus
 from app.core.resume_parser import ResumeParser
 from app.core.source_discovery import SourceDiscovery
 from app.core.types import (
@@ -44,7 +45,7 @@ class JobMatchEngine:
 
     def save_resume(self, source_path: str | Path) -> ResumeProfile:
         path = Path(source_path)
-        parsed = self.resume_parser.parse(path)
+        parsed = self.resume_parser.parse(path, llm_enricher=self._make_ollama_enricher())
         stored_name = f"{datetime.now(UTC).strftime('%Y%m%d-%H%M%S')}-{safe_filename(path.stem, path.suffix)}"
         stored_path = UPLOADS_DIR / stored_name
         stored_path.write_bytes(path.read_bytes())
@@ -104,6 +105,12 @@ class JobMatchEngine:
     def update_settings(self, values: dict) -> None:
         self.storage.update_settings(values)
 
+    def get_ollama_status(self) -> OllamaStatus:
+        settings = self.get_settings()
+        base_url = str(settings.get("ollama_base_url", ""))
+        model_name = str(settings.get("ollama_model_name", ""))
+        return OllamaEnricher(base_url=base_url, model_name=model_name).status()
+
     def get_browser_api_token(self) -> str:
         token = str(self.storage.get_setting("browser_api_token", "") or "")
         if token:
@@ -154,13 +161,14 @@ class JobMatchEngine:
             raise ValueError("Browser capture is missing the page URL.")
 
         source = self._resolve_browser_capture_source(page_url, page or {}, source_meta or {}, jobs_payload)
+        llm_enricher = self._make_ollama_enricher()
         normalized_jobs = []
         for item in jobs_payload:
             if not isinstance(item, dict):
                 continue
             prepared = self._prepare_browser_capture_payload(source, item, page or {}, page_url, payload)
             try:
-                normalized_jobs.append(self.job_fetcher.normalizer.normalize(source, prepared))
+                normalized_jobs.append(self.job_fetcher.normalizer.normalize(source, prepared, llm_enricher=llm_enricher))
             except Exception:
                 continue
 
@@ -206,10 +214,12 @@ class JobMatchEngine:
             if self.job_fetcher.determine_source_type(source) == "indeed"
             else source
         )
+        llm_enricher = self._make_ollama_enricher()
         result = await self.job_fetcher.import_source_page(
             browser_source,
             known_jobs=known_jobs,
             max_jobs=int(self.get_settings().get("max_source_jobs", DEFAULT_SETTINGS["max_source_jobs"])),
+            llm_enricher=llm_enricher,
         )
         return self._store_manual_import(source, result, status="manual_import")
 
@@ -217,10 +227,12 @@ class JobMatchEngine:
         source = self.storage.get_source(source_id)
         if source is None:
             raise ValueError("Source not found.")
+        llm_enricher = self._make_ollama_enricher()
         result = self.job_fetcher.import_saved_html(
             source,
             html_text,
             max_jobs=int(self.get_settings().get("max_source_jobs", DEFAULT_SETTINGS["max_source_jobs"])),
+            llm_enricher=llm_enricher,
         )
         return self._store_manual_import(source, result, status="manual_import")
 
@@ -235,7 +247,8 @@ class JobMatchEngine:
             if self.job_fetcher.determine_source_type(source) == "indeed"
             else source
         )
-        result = await self.job_fetcher.import_job_urls(browser_source, urls)
+        llm_enricher = self._make_ollama_enricher()
+        result = await self.job_fetcher.import_job_urls(browser_source, urls, llm_enricher=llm_enricher)
         return self._store_manual_import(source, result, status="manual_import")
 
     async def scan_sources(
@@ -265,6 +278,7 @@ class JobMatchEngine:
             settings = self.get_settings()
             max_jobs = int(settings.get("max_source_jobs", DEFAULT_SETTINGS["max_source_jobs"]))
             semaphore = asyncio.Semaphore(DEFAULT_SCAN_CONCURRENCY)
+            llm_enricher = self._make_ollama_enricher()
 
             async def run_scan(source: JobSourceConfig):
                 async with semaphore:
@@ -287,6 +301,7 @@ class JobMatchEngine:
                             known_jobs=known_jobs,
                             progress_callback=on_progress,
                             cancel_requested=self._scan_cancel_requested.is_set,
+                            llm_enricher=llm_enricher,
                         )
                     if scan_id is not None:
                         if result.status == "ok":
@@ -593,6 +608,22 @@ class JobMatchEngine:
             matcher = JobMatcher(model_name, normalized)
             self._matcher_cache[cache_key] = matcher
         return matcher
+
+    def _make_ollama_enricher(self) -> OllamaEnricher | None:
+        settings = self.get_settings()
+        if not bool(settings.get("ollama_enabled")):
+            return None
+        base_url = normalize_whitespace(str(settings.get("ollama_base_url") or ""))
+        model_name = normalize_whitespace(str(settings.get("ollama_model_name") or ""))
+        if not base_url or not model_name:
+            return None
+        return OllamaEnricher(
+            base_url=base_url,
+            model_name=model_name,
+            resume_enabled=bool(settings.get("ollama_enhance_resume", True)),
+            job_enabled=bool(settings.get("ollama_enhance_jobs", True)),
+            max_job_enrichments=int(settings.get("ollama_max_job_enrichments", 20) or 0),
+        )
 
     @staticmethod
     def _emit_progress(on_progress: Callable[[dict], None] | None, **event: object) -> None:

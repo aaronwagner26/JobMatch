@@ -655,6 +655,7 @@ class JobMatchUI:
 
     def render_settings(self) -> None:
         settings = self.engine.get_settings()
+        ollama_status = self.engine.get_ollama_status()
         browser_token = self.engine.get_browser_api_token()
         with ui.column().classes("w-full gap-4"):
             with ui.row().classes("w-full items-end justify-between"):
@@ -709,6 +710,52 @@ class JobMatchUI:
                         step=0.01,
                     ).props("outlined").classes("w-full mt-3")
                     ui.label("Weights are normalized automatically, so they do not need to sum to 1.0.").classes("mt-3 muted-copy")
+
+                with ui.element("section").classes("panel"):
+                    ui.label("Ollama").classes("text-lg font-semibold")
+                    if ollama_status.available:
+                        status_text = f"Connected to {settings.get('ollama_base_url')} with model {settings.get('ollama_model_name')}."
+                    elif ollama_status.running:
+                        status_text = (
+                            f"Ollama is reachable at {settings.get('ollama_base_url')}, but model "
+                            f"{settings.get('ollama_model_name')} is not loaded."
+                        )
+                    else:
+                        status_text = f"Ollama is not reachable at {settings.get('ollama_base_url')}: {ollama_status.error}"
+                    ui.label(status_text).classes("mt-1 page-subtitle")
+                    if ollama_status.models:
+                        ui.label(f"Available models: {', '.join(ollama_status.models[:8])}").classes("mt-2 muted-copy text-sm")
+                    else:
+                        ui.label("Available models: none reported by the local runtime.").classes("mt-2 muted-copy text-sm")
+                    self.settings_inputs["ollama_enabled"] = ui.switch(
+                        "Enable Ollama refinement",
+                        value=bool(settings.get("ollama_enabled", False)),
+                    ).classes("mt-3")
+                    self.settings_inputs["ollama_base_url"] = ui.input(
+                        "Ollama base URL",
+                        value=str(settings.get("ollama_base_url")),
+                    ).props("outlined").classes("w-full mt-3")
+                    self.settings_inputs["ollama_model_name"] = ui.input(
+                        "Ollama model",
+                        value=str(settings.get("ollama_model_name")),
+                    ).props("outlined").classes("w-full mt-3")
+                    self.settings_inputs["ollama_enhance_resume"] = ui.switch(
+                        "Use Ollama for resume refinement",
+                        value=bool(settings.get("ollama_enhance_resume", True)),
+                    ).classes("mt-3")
+                    self.settings_inputs["ollama_enhance_jobs"] = ui.switch(
+                        "Use Ollama for job refinement",
+                        value=bool(settings.get("ollama_enhance_jobs", True)),
+                    ).classes("mt-2")
+                    self.settings_inputs["ollama_max_job_enrichments"] = ui.number(
+                        "Max Ollama job enrichments per scan/import",
+                        value=int(settings.get("ollama_max_job_enrichments", 20)),
+                        min=0,
+                        step=1,
+                    ).props("outlined").classes("w-full mt-3")
+                    ui.label(
+                        "Ollama refinement is optional and local-only. It runs only when enabled and a model is actually loaded."
+                    ).classes("mt-3 muted-copy text-sm")
 
                 with ui.element("section").classes("panel"):
                     ui.label("Browser Capture").classes("text-lg font-semibold")
@@ -1052,6 +1099,8 @@ class JobMatchUI:
     def save_settings(self) -> None:
         values = {key: element.value for key, element in self.settings_inputs.items()}
         self.engine.update_settings(values)
+        if self.state.current_view == "settings":
+            self.render_current_view()
         self._notify("Settings saved.", type="positive")
 
     def rotate_browser_api_token(self) -> None:

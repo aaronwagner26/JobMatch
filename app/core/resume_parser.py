@@ -58,7 +58,7 @@ COMPANY_HINTS = {"inc", "llc", "corp", "corporation", "ltd", "university", "syst
 
 
 class ResumeParser:
-    def parse(self, file_path: str | Path) -> ResumeProfile:
+    def parse(self, file_path: str | Path, *, llm_enricher=None) -> ResumeProfile:
         path = Path(file_path)
         suffix = path.suffix.lower()
         if suffix == ".pdf":
@@ -94,6 +94,29 @@ class ResumeParser:
         clearance_info = extract_clearance_info("\n".join([experience_text, sections.get("summary", ""), cleaned]))
         recent_titles = self._extract_recent_titles(experience_text)
         experience_spans, experience_years = self._estimate_experience(experience_text or cleaned)
+        llm_summary = ""
+        if llm_enricher is not None:
+            enrichment = llm_enricher.enrich_resume(
+                raw_text=cleaned,
+                sections=sections,
+                extracted={
+                    "skills": skills,
+                    "tools": tools,
+                    "certifications": certifications,
+                    "clearance_terms": list(clearance_info["terms"]),
+                    "recent_titles": recent_titles,
+                    "experience_years": experience_years,
+                },
+            )
+            skills = self._merge_lists(skills, enrichment.get("skills"))
+            tools = self._merge_lists(tools, enrichment.get("tools"))
+            certifications = self._merge_lists(certifications, enrichment.get("certifications"))
+            merged_clearance = self._merge_lists(list(clearance_info["terms"]), enrichment.get("clearance_terms"))
+            clearance_info["terms"] = merged_clearance
+            recent_titles = self._merge_lists(recent_titles, enrichment.get("recent_titles"))[:8]
+            if enrichment.get("experience_years_hint"):
+                experience_years = max(experience_years, float(enrichment["experience_years_hint"]))
+            llm_summary = normalize_whitespace(str(enrichment.get("summary") or ""))
         summary_text = self._build_summary(
             sections=sections,
             skills=skills,
@@ -102,6 +125,7 @@ class ResumeParser:
             clearance_terms=list(clearance_info["terms"]),
             recent_titles=recent_titles,
             experience_years=experience_years,
+            llm_summary=llm_summary,
         )
 
         return ResumeProfile(
@@ -265,8 +289,11 @@ class ResumeParser:
         clearance_terms: list[str],
         recent_titles: list[str],
         experience_years: float,
+        llm_summary: str = "",
     ) -> str:
         parts: list[str] = []
+        if llm_summary:
+            parts.append(f"Structured profile: {llm_summary}")
         if recent_titles:
             parts.append(f"Recent titles: {', '.join(recent_titles[:6])}")
         if skills:
@@ -288,6 +315,18 @@ class ResumeParser:
         if sections.get("projects"):
             parts.append(f"Projects: {sections['projects']}")
         return "\n".join(parts)
+
+    @staticmethod
+    def _merge_lists(left: list[str], right: list[str] | None) -> list[str]:
+        values = list(left)
+        if right:
+            values.extend(str(item) for item in right)
+        seen: dict[str, str] = {}
+        for value in values:
+            normalized = normalize_whitespace(value)
+            if normalized:
+                seen.setdefault(normalized.casefold(), normalized)
+        return list(seen.values())
 
     @staticmethod
     def _experience_highlights(experience_text: str, limit: int = 4) -> str:
