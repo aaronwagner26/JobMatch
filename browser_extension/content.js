@@ -97,10 +97,10 @@ function captureLinkedInSelectedDetail() {
 function captureIndeedPage() {
   const cards = Array.from(document.querySelectorAll('[data-jk], [data-testid="slider_item"], a[href*="/viewjob"]'));
   const jobs = uniqueJobs(cards.map((node) => {
-    const anchor = node.tagName === 'A' ? node : firstNode(node, ['a[href*="/viewjob"]', 'a[href*="jk="]']);
+    const anchor = node.tagName === 'A' ? node : firstNode(node, ['a[href*="/viewjob"]', 'a[href*="jk="]', 'a[href*="/rc/clk"]', 'a[href*="/pagead/clk"]']);
     const container = node.tagName === 'A' ? node.closest('[data-jk], [data-testid="slider_item"], article, li, div') || node : node;
-    const url = absoluteUrl(anchor?.href || '');
-    const rawId = container?.getAttribute?.('data-jk') || anchor?.getAttribute?.('data-jk') || jobIdFromUrl(url);
+    const rawId = normalizeText(container?.getAttribute?.('data-jk') || anchor?.getAttribute?.('data-jk') || jobIdFromUrl(anchor?.href || ''));
+    const url = canonicalIndeedJobUrl(anchor?.href || '', rawId);
     return {
       raw_id: rawId || url,
       title: text(anchor),
@@ -270,6 +270,27 @@ function jobIdFromUrl(url) {
     return indeedMatch[1];
   }
   return '';
+}
+
+function canonicalIndeedJobUrl(href, rawId) {
+  const resolved = absoluteUrl(href || '');
+  let jobId = normalizeText(rawId);
+  try {
+    const url = new URL(resolved || location.href, location.href);
+    for (const key of ['jk', 'currentJobId', 'vjk']) {
+      const value = normalizeText(url.searchParams.get(key) || '');
+      if (value) {
+        jobId = value;
+        break;
+      }
+    }
+    if (url.hostname.toLowerCase().includes('indeed.') && jobId) {
+      return `${url.protocol}//${url.host}/viewjob?jk=${encodeURIComponent(jobId)}`;
+    }
+    return resolved;
+  } catch (_error) {
+    return resolved;
+  }
 }
 
 function siteNameFromHost(host) {

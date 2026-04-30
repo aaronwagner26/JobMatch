@@ -27,7 +27,7 @@ from app.core.types import (
 )
 from app.db.storage import Storage
 from app.utils.config import DEFAULT_SCAN_CONCURRENCY, DEFAULT_SETTINGS, EXPORTS_DIR, UPLOADS_DIR, ensure_directories
-from app.utils.text import canonical_job_key, normalize_whitespace, safe_filename, sanitize_source_url
+from app.utils.text import capture_job_url, canonical_job_key, normalize_whitespace, safe_filename, sanitize_source_url
 
 
 class JobMatchEngine:
@@ -524,7 +524,12 @@ class JobMatchEngine:
         root_payload: dict[str, object],
     ) -> dict[str, object]:
         payload = dict(item)
-        payload["url"] = sanitize_source_url(str(item.get("url") or page_url), "browser_capture")
+        raw_id = normalize_whitespace(str(item.get("raw_id") or item.get("external_id") or ""))
+        payload["url"] = capture_job_url(
+            str(item.get("url") or ""),
+            page_url=page_url,
+            raw_id=raw_id,
+        ) or capture_job_url(page_url)
         payload["company"] = normalize_whitespace(str(item.get("company") or source.name))
         payload["title"] = normalize_whitespace(str(item.get("title") or ""))
         payload["location"] = normalize_whitespace(str(item.get("location") or ""))
@@ -542,8 +547,10 @@ class JobMatchEngine:
             }
         )
         payload["metadata"] = metadata
-        if not payload.get("raw_id"):
-            payload["raw_id"] = payload["url"]
+        payload["canonical_url"] = payload["url"]
+        if not raw_id:
+            raw_id = normalize_whitespace(str(payload["url"]))
+        payload["raw_id"] = raw_id
         return payload
 
     @staticmethod

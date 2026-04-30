@@ -8,7 +8,7 @@ from app.core.engine import JobMatchEngine
 from app.core.job_fetcher import JobFetcher, SourceThrottle
 from app.core.normalizer import JobNormalizer
 from app.core.types import JobSourceConfig, NormalizedJob
-from app.utils.text import sanitize_source_url
+from app.utils.text import canonical_job_url, sanitize_source_url
 
 
 class FakeResponse:
@@ -303,6 +303,18 @@ def test_sanitize_source_url_strips_indeed_challenge_parameters() -> None:
     )
 
     assert sanitize_source_url(url, "indeed") == "https://www.indeed.com/jobs?l=Remote&q=system+administrator"
+
+
+def test_canonical_job_url_preserves_indeed_job_identity() -> None:
+    assert canonical_job_url(
+        "https://www.indeed.com/pagead/clk?mo=r&ad=-6NYlbfk&vjk=job-a&from=serp"
+    ) == "https://www.indeed.com/viewjob?jk=job-a"
+    assert canonical_job_url(
+        "https://www.indeed.com/rc/clk?jk=job-b&from=vj"
+    ) == "https://www.indeed.com/viewjob?jk=job-b"
+    assert canonical_job_url(
+        "https://www.indeed.com/viewjob?currentJobId=job-c&from=app"
+    ) == "https://www.indeed.com/viewjob?jk=job-c"
 
 
 def test_scan_source_returns_cancelled_when_requested() -> None:

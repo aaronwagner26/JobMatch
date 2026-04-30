@@ -173,3 +173,62 @@ def test_browser_capture_import_creates_manual_only_source_and_merges_jobs() -> 
     jobs = storage.list_jobs()
     assert len(jobs) == 2
     assert {job.company for job in jobs} == {"Netflix"}
+
+
+def test_browser_capture_import_keeps_indeed_jobs_distinct_for_ranking() -> None:
+    storage = Storage("sqlite+pysqlite:///:memory:")
+    engine = JobMatchEngine(storage=storage)
+    payload = {
+        "parser": "indeed_search",
+        "page": {
+            "url": "https://www.indeed.com/jobs?q=system+administrator&l=Remote",
+            "title": "System Administrator Jobs, Employment in Remote | Indeed",
+            "site": "Indeed",
+        },
+        "source": {
+            "site": "Indeed",
+        },
+        "jobs": [
+            {
+                "raw_id": "job-a",
+                "title": "System Administrator I",
+                "company": "Example Co",
+                "location": "Remote",
+                "summary": "Windows and Active Directory",
+                "url": "https://www.indeed.com/pagead/clk?mo=r&ad=-6NYlbfk",
+            },
+            {
+                "raw_id": "job-b",
+                "title": "System Administrator II",
+                "company": "Example Co",
+                "location": "Remote",
+                "summary": "Azure and Intune",
+                "url": "https://www.indeed.com/rc/clk?vjk=job-b&from=serp",
+            },
+            {
+                "raw_id": "job-c",
+                "title": "System Administrator III",
+                "company": "Example Co",
+                "location": "Remote",
+                "summary": "VMware and PowerShell",
+                "url": "https://www.indeed.com/viewjob?currentJobId=job-c",
+            },
+        ],
+    }
+
+    result = engine.import_browser_capture(payload)
+
+    assert result["jobs_imported"] == 3
+    jobs = storage.list_jobs()
+    assert len(jobs) == 3
+    assert {job.url for job in jobs} == {
+        "https://www.indeed.com/viewjob?jk=job-a",
+        "https://www.indeed.com/viewjob?jk=job-b",
+        "https://www.indeed.com/viewjob?jk=job-c",
+    }
+    assert {job.metadata["canonical_url"] for job in jobs} == {
+        "https://www.indeed.com/viewjob?jk=job-a",
+        "https://www.indeed.com/viewjob?jk=job-b",
+        "https://www.indeed.com/viewjob?jk=job-c",
+    }
+    assert len(JobMatchEngine._deduplicate_jobs(jobs)) == 3

@@ -28,6 +28,8 @@ TRACKING_QUERY_KEYS = {
     "trk",
     "vjk",
 }
+INDEED_JOB_ID_KEYS = ("jk", "currentJobId", "vjk")
+INDEED_JOB_ID_KEYS_FOLDED = {key.casefold() for key in INDEED_JOB_ID_KEYS}
 INDEED_ALLOWED_QUERY_KEYS = {
     "explvl",
     "filter",
@@ -89,6 +91,12 @@ def canonical_job_url(url: str | None) -> str:
     split = urlsplit(url)
     if not split.scheme or not split.netloc:
         return normalize_whitespace(url)
+    host = split.netloc.casefold()
+    if "indeed." in host:
+        job_id = indeed_job_id(url)
+        if job_id:
+            query = urlencode([("jk", job_id)])
+            return urlunsplit((split.scheme.casefold(), host, "/viewjob", query, ""))
     filtered_query = [
         (key, value)
         for key, value in parse_qsl(split.query, keep_blank_values=False)
@@ -97,6 +105,40 @@ def canonical_job_url(url: str | None) -> str:
     normalized_path = re.sub(r"/{2,}", "/", split.path or "/").rstrip("/") or "/"
     query = urlencode(sorted(filtered_query))
     return urlunsplit((split.scheme.casefold(), split.netloc.casefold(), normalized_path, query, ""))
+
+
+def indeed_job_id(url: str | None) -> str:
+    if not url:
+        return ""
+    split = urlsplit(normalize_whitespace(url))
+    for key, value in parse_qsl(split.query, keep_blank_values=False):
+        if key.casefold() in INDEED_JOB_ID_KEYS_FOLDED:
+            normalized = normalize_whitespace(value)
+            if normalized:
+                return normalized
+    return ""
+
+
+def capture_job_url(url: str | None, *, page_url: str | None = None, raw_id: str | None = None) -> str:
+    candidate = normalize_whitespace(url)
+    if not candidate and page_url:
+        page_split = urlsplit(page_url)
+        if page_split.scheme and page_split.netloc and raw_id and "indeed." in page_split.netloc.casefold():
+            query = urlencode([("jk", normalize_whitespace(raw_id))])
+            return urlunsplit((page_split.scheme.casefold(), page_split.netloc.casefold(), "/viewjob", query, ""))
+        candidate = normalize_whitespace(page_url)
+    if not candidate:
+        return ""
+
+    split = urlsplit(candidate)
+    if split.scheme and split.netloc and "indeed." in split.netloc.casefold():
+        job_id = indeed_job_id(candidate) or normalize_whitespace(raw_id)
+        if job_id:
+            query = urlencode([("jk", job_id)])
+            return urlunsplit((split.scheme.casefold(), split.netloc.casefold(), "/viewjob", query, ""))
+    if page_url and not split.scheme and not split.netloc:
+        candidate = absolute_url(page_url, candidate)
+    return canonical_job_url(candidate)
 
 
 def canonical_job_key(title: str, company: str, location: str, url: str | None, job_type: str | None = None) -> str:
