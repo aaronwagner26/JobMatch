@@ -132,6 +132,7 @@ async function captureIndeedPage() {
     },
     getClickTarget: (node) => firstNode(node, ['a[href*="/viewjob"]', '[data-jk]']) || node,
     captureDetail: (rawId, options = {}) => captureIndeedSelectedDetail(rawId, options),
+    shouldSkipDetailWalk: (node) => looksLikeGroupedOpeningsCard(node),
   });
   const detail = captureIndeedSelectedDetail();
   if (cards.length === 0 && detail) {
@@ -375,6 +376,9 @@ async function captureVisibleResultDetails(cards, options) {
     if (!rawId || detailMap.has(rawId)) {
       continue;
     }
+    if (typeof options.shouldSkipDetailWalk === 'function' && options.shouldSkipDetailWalk(card, rawId)) {
+      continue;
+    }
     const currentDetail = options.captureDetail('', { useHint: false });
     if (currentDetail?.title && normalizeText(currentDetail.raw_id) === rawId) {
       detailMap.set(rawId, currentDetail);
@@ -415,10 +419,10 @@ async function waitForDetailChange(rawId, previousSignature, captureDetail) {
     }
   }
   const fallbackDetail = captureDetail(rawId, { useHint: true });
-  if (fallbackDetail?.title) {
+  if (fallbackDetail?.title && detailSignature(fallbackDetail) !== previousSignature) {
     return fallbackDetail;
   }
-  return fallbackDetail;
+  return null;
 }
 
 function looksLikeJobUrl(url) {
@@ -459,6 +463,17 @@ function canonicalIndeedJobUrl(href, rawId) {
   } catch (_error) {
     return resolved;
   }
+}
+
+function looksLikeGroupedOpeningsCard(node) {
+  const value = normalizeText([
+    firstText(node, ['[data-testid="attribute_snippet_testid"]']),
+    text(node),
+  ].join(' ')).toLowerCase();
+  if (!value) {
+    return false;
+  }
+  return /\bmultiple openings\b|\bmultiple jobs\b|\bhiring multiple\b|\bseveral openings\b/.test(value);
 }
 
 function siteNameFromHost(host) {
