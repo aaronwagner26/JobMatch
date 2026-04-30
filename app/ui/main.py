@@ -25,7 +25,7 @@ from app.utils.config import (
     UPLOADS_DIR,
 )
 from app.utils.logging import configure_logging
-from app.utils.skills import CLEARANCE_PATTERNS, extract_salary_info
+from app.utils.skills import CLEARANCE_PATTERNS, detect_job_type, extract_salary_info
 from app.utils.text import clipped_excerpt, normalize_whitespace, safe_filename
 
 configure_logging()
@@ -115,8 +115,14 @@ ui.add_css(
     .match-table .q-table__middle { overflow-x: hidden; }
     .match-table table { width: 100%; table-layout: fixed; }
     .match-table th, .match-table td { white-space: normal; }
-    .match-role-meta { display: flex; flex-wrap: wrap; gap: 0.35rem 0.65rem; margin-top: 0.3rem; font-size: 0.82rem; color: var(--app-muted); }
-    .match-role-meta span { white-space: nowrap; }
+    .match-col-expander { width: 3.5rem; max-width: 3.5rem; }
+    .match-col-score { width: 6rem; max-width: 6rem; }
+    .match-col-type { width: 8.5rem; max-width: 8.5rem; }
+    .match-col-salary { width: 10.5rem; max-width: 10.5rem; }
+    .match-col-open { width: 7rem; max-width: 7rem; text-align: right; }
+    .match-col-company, .match-col-location { width: 14rem; }
+    .match-table .q-btn.open-job-btn { min-height: 2rem; padding: 0 0.65rem; }
+    .match-table .q-btn.expand-btn { min-width: 2rem; min-height: 2rem; }
     .scan-actions { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: center; justify-content: space-between; width: 100%; }
     .scan-actions-left, .scan-actions-right { display: flex; flex-wrap: wrap; gap: 0.6rem; align-items: center; }
     .scan-grid { display: grid; grid-template-columns: minmax(460px, 1.15fr) minmax(320px, 0.85fr); gap: 1rem; width: 100%; }
@@ -1664,12 +1670,14 @@ class JobMatchUI:
     def _render_results_table(self, matches: list[MatchResult]) -> None:
         rows = [self._match_row(match) for match in matches]
         columns = [
-            {"name": "expander", "label": "", "field": "id"},
-            {"name": "score_value", "label": "Match", "field": "score_value", "sortable": True},
+            {"name": "expander", "label": "", "field": "id", "style": "width: 3.5rem", "headerStyle": "width: 3.5rem"},
+            {"name": "score_value", "label": "Match", "field": "score_value", "sortable": True, "style": "width: 6rem", "headerStyle": "width: 6rem"},
             {"name": "title", "label": "Role", "field": "title", "sortable": True},
-            {"name": "job_type", "label": "Type", "field": "job_type", "sortable": True},
-            {"name": "salary_text", "label": "Salary", "field": "salary_text", "sortable": True},
-            {"name": "open_action", "label": "", "field": "open_action"},
+            {"name": "company", "label": "Company", "field": "company", "sortable": True, "style": "width: 14rem", "headerStyle": "width: 14rem"},
+            {"name": "location", "label": "Location", "field": "location", "sortable": True, "style": "width: 14rem", "headerStyle": "width: 14rem"},
+            {"name": "job_type", "label": "Type", "field": "job_type", "sortable": True, "style": "width: 8.5rem", "headerStyle": "width: 8.5rem"},
+            {"name": "salary_text", "label": "Salary", "field": "salary_text", "sortable": True, "style": "width: 10.5rem", "headerStyle": "width: 10.5rem"},
+            {"name": "open_action", "label": "", "field": "open_action", "style": "width: 7rem", "headerStyle": "width: 7rem"},
         ]
         table = ui.table(rows=rows, columns=columns, row_key="id", pagination={"rowsPerPage": 18, "sortBy": "score_value", "descending": True}).classes("w-full match-table")
         table.props("flat square separator=horizontal")
@@ -1677,30 +1685,31 @@ class JobMatchUI:
             "body",
             r"""
             <q-tr :props="props">
-              <q-td auto-width>
-                <q-btn flat dense round size="sm"
+              <q-td key="expander" :props="props" class="match-col-expander" auto-width>
+                <q-btn flat dense round size="sm" class="expand-btn"
                   :icon="props.expand ? 'keyboard_arrow_down' : 'keyboard_arrow_right'"
                   @click="props.expand = !props.expand" />
               </q-td>
-              <q-td key="score_value" :props="props">
+              <q-td key="score_value" :props="props" class="match-col-score">
                 <span class="score-pill">{{ props.row.score_display }}</span>
               </q-td>
               <q-td key="title" :props="props">
                 <div class="job-primary">{{ props.row.title }}</div>
                 <div class="job-secondary">{{ props.row.matched_summary }}</div>
-                <div class="match-role-meta">
-                  <span>{{ props.row.company }}</span>
-                  <span>{{ props.row.location }}</span>
-                  <span>{{ props.row.remote_mode }}</span>
-                </div>
               </q-td>
-              <q-td key="job_type" :props="props">{{ props.row.job_type }}</q-td>
-              <q-td key="salary_text" :props="props">
+              <q-td key="company" :props="props" class="match-col-company">{{ props.row.company }}</q-td>
+              <q-td key="location" :props="props" class="match-col-location">
+                <div>{{ props.row.location }}</div>
+                <div class="job-secondary">{{ props.row.remote_mode }}</div>
+              </q-td>
+              <q-td key="job_type" :props="props" class="match-col-type">{{ props.row.job_type }}</q-td>
+              <q-td key="salary_text" :props="props" class="match-col-salary">
                 <span v-if="props.row.salary_text" class="salary-pill">{{ props.row.salary_text }}</span>
                 <span v-else class="job-secondary">-</span>
               </q-td>
-              <q-td key="open_action" :props="props" auto-width>
+              <q-td key="open_action" :props="props" class="match-col-open" auto-width>
                 <q-btn
+                  class="open-job-btn"
                   color="primary"
                   dense
                   unelevated
@@ -1786,22 +1795,13 @@ class JobMatchUI:
     @staticmethod
     def _display_type_and_salary(job_type: str | None, salary_text: str | None, employment_text: str | None) -> tuple[str, str]:
         parsed_salary = extract_salary_info(salary_text or "").get("display") if salary_text else None
-        type_parts: list[str] = []
-        seen: set[str] = set()
-        for value in [job_type or "", employment_text or ""]:
-            normalized = normalize_whitespace(value)
-            if not normalized:
-                continue
-            folded = normalized.casefold()
-            if folded in seen:
-                continue
-            seen.add(folded)
-            type_parts.append(normalized)
-        if salary_text and not parsed_salary:
-            normalized_salary = normalize_whitespace(salary_text)
-            if normalized_salary and normalized_salary.casefold() not in seen:
-                type_parts.append(normalized_salary)
-        type_display = " | ".join(type_parts) if type_parts else "unspecified"
+        type_display = normalize_whitespace(job_type or "")
+        if not type_display:
+            type_display = normalize_whitespace(detect_job_type(employment_text or "") or "")
+        if not type_display:
+            type_display = normalize_whitespace(detect_job_type(salary_text or "") or "")
+        if not type_display:
+            type_display = "unspecified"
         return type_display, parsed_salary or ""
 
     @staticmethod
