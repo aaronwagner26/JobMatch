@@ -77,11 +77,12 @@ class HybridScorer:
         resume_skills: list[str],
         job_required_skills: list[str],
         job_preferred_skills: list[str],
+        job_all_skills: list[str] | None = None,
         resume_experience_years: float,
         job_experience_years: float | None,
     ) -> tuple[float, float, float, float]:
         embedding_score = cosine_similarity(resume_embedding, job_embedding)
-        skill_score = self._skill_overlap(resume_skills, job_required_skills, job_preferred_skills)
+        skill_score = self._skill_overlap(resume_skills, job_required_skills, job_preferred_skills, job_all_skills or [])
         experience_score = self._experience_alignment(resume_experience_years, job_experience_years)
         final_score = (
             embedding_score * self.weights.embedding
@@ -91,16 +92,29 @@ class HybridScorer:
         return final_score, embedding_score, skill_score, experience_score
 
     @staticmethod
-    def _skill_overlap(resume_skills: list[str], required_skills: list[str], preferred_skills: list[str]) -> float:
+    def _skill_overlap(
+        resume_skills: list[str],
+        required_skills: list[str],
+        preferred_skills: list[str],
+        all_skills: list[str],
+    ) -> float:
         resume_set = {skill.casefold() for skill in resume_skills}
         weighted_skills: list[tuple[str, float]] = []
         weighted_skills.extend((skill, 1.0) for skill in required_skills)
         weighted_skills.extend((skill, 0.55) for skill in preferred_skills if skill not in required_skills)
         if not weighted_skills:
+            weighted_skills.extend((skill, 0.75) for skill in all_skills)
+        if not weighted_skills:
             return 0.5 if resume_set else 0.0
         matched = sum(weight for skill, weight in weighted_skills if skill.casefold() in resume_set)
         total = sum(weight for _, weight in weighted_skills)
-        return matched / total if total else 0.0
+        coverage = matched / total if total else 0.0
+        required_total = sum(weight for _, weight in weighted_skills if weight >= 1.0)
+        required_matched = sum(weight for skill, weight in weighted_skills if weight >= 1.0 and skill.casefold() in resume_set)
+        if required_total:
+            required_coverage = required_matched / required_total
+            coverage = (coverage * 0.75) + (required_coverage * 0.25)
+        return coverage
 
     @staticmethod
     def _experience_alignment(resume_years: float, required_years: float | None) -> float:

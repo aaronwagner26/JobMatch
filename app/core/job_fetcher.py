@@ -20,6 +20,7 @@ from bs4 import BeautifulSoup
 
 from app.core.normalizer import JobNormalizer
 from app.core.types import JobSourceConfig, NormalizedJob, ScanResult
+from app.utils.skills import format_salary_display
 from app.utils.config import (
     BROWSER_PROFILES_DIR,
     DEFAULT_BROWSER_CHALLENGE_WAIT_SECONDS,
@@ -871,6 +872,15 @@ class JobFetcher:
                 ],
             ),
             "description": description,
+            "salary_text": self._first_text(
+                soup,
+                [
+                    ".salaryText",
+                    "[data-testid='salaryInfoAndJobType']",
+                    "[data-testid='attribute_snippet_testid']",
+                    "[class*='salary']",
+                ],
+            ),
             "url": url,
             "posted_at": self._first_text(soup, [".date", "[data-testid='myJobsStateDate']", "time"]),
         }
@@ -935,6 +945,7 @@ class JobFetcher:
                         "company": self._first_text(parent, [".companyName", "[data-testid='company-name']", "span.companyName"]),
                         "location": self._first_text(parent, [".companyLocation", "[data-testid='text-location']"]),
                         "summary": self._first_text(parent, [".job-snippet", "[data-testid='job-snippet']"]),
+                        "salary_text": self._first_text(parent, [".salary-snippet", ".estimated-salary", "[class*='salary']"]),
                         "url": absolute_url(base_url, anchor.get("href")),
                         "posted_at": self._first_text(parent, [".date", "[data-testid='myJobsStateDate']"]),
                     }
@@ -963,6 +974,7 @@ class JobFetcher:
                     "company": self._first_text(container, [".company", ".job-company", "[data-testid='company']"]),
                     "location": self._first_text(container, [".location", ".job-location", "[data-testid='location']"]),
                     "summary": self._first_text(container, [".description", ".job-description", "p"]),
+                    "salary_text": self._first_text(container, [".salary", ".salary-range", ".compensation"]),
                     "url": absolute_url(base_url, href),
                     "employment_text": self._first_text(container, [".employment-type", ".job-type"]),
                 }
@@ -990,6 +1002,7 @@ class JobFetcher:
                     "company": self._first_text(container, [".company", ".posting-company", "[itemprop='hiringOrganization']"]),
                     "location": self._first_text(container, [".location", "[itemprop='jobLocation']"]),
                     "summary": self._first_text(container, [".description", ".summary", "p"]),
+                    "salary_text": self._first_text(container, [".salary", ".salary-range", ".compensation"]),
                     "url": absolute_url(base_url, href),
                 }
             )
@@ -1066,6 +1079,7 @@ class JobFetcher:
                     "url": absolute_url(base_url, record.get("url")),
                     "posted_at": record.get("datePosted"),
                     "job_type": record.get("employmentType"),
+                    "salary_text": self._json_ld_salary_text(record),
                 }
             ]
         graph = record.get("@graph")
@@ -1566,3 +1580,28 @@ class JobFetcher:
         if isinstance(location, list):
             return normalize_whitespace(", ".join(filter(None, [JobFetcher._flatten_json_ld_location(item) for item in location])))
         return normalize_whitespace(str(location or ""))
+
+    def _json_ld_salary_text(self, record: dict[str, Any]) -> str:
+        base_salary = record.get("baseSalary")
+        if not isinstance(base_salary, dict):
+            return ""
+        value = base_salary.get("value")
+        currency = str(base_salary.get("currency") or "USD")
+        if not isinstance(value, dict):
+            return ""
+        try:
+            minimum = float(value.get("minValue")) if value.get("minValue") not in (None, "") else None
+            maximum = float(value.get("maxValue")) if value.get("maxValue") not in (None, "") else None
+        except (TypeError, ValueError):
+            return ""
+        unit = str(value.get("unitText") or "").casefold()
+        interval = "year"
+        if "hour" in unit:
+            interval = "hour"
+        elif "day" in unit:
+            interval = "day"
+        elif "week" in unit:
+            interval = "week"
+        elif "month" in unit:
+            interval = "month"
+        return format_salary_display(minimum, maximum, currency=currency, interval=interval) or ""

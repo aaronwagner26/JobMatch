@@ -15,6 +15,9 @@ class ResumeProfile:
     summary_text: str
     skills: list[str]
     tools: list[str]
+    certifications: list[str]
+    clearance_terms: list[str]
+    recent_titles: list[str]
     experience_years: float
     experience_spans: list[dict[str, str]]
     sections: dict[str, str]
@@ -59,6 +62,11 @@ class NormalizedJob:
     remote_mode: str
     job_type: str | None
     clearance_terms: list[str]
+    salary_min: float | None
+    salary_max: float | None
+    salary_currency: str | None
+    salary_interval: str | None
+    salary_text: str | None
     posted_at: datetime | None
     url: str
     description: str

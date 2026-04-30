@@ -122,6 +122,8 @@ ui.add_css(
     .recent-scan-table .q-table__middle { max-height: 260px; }
     .results-shell thead tr th { position: sticky; top: 0; z-index: 1; background: var(--app-surface); }
     .score-pill { display: inline-flex; min-width: 3.7rem; justify-content: center; padding: 0.2rem 0.45rem; border-radius: 999px; background: rgba(15, 118, 110, 0.12); color: var(--app-accent); font-size: 0.78rem; }
+    .salary-pill { display: inline-flex; padding: 0.2rem 0.45rem; border-radius: 999px; background: rgba(124, 58, 237, 0.12); color: #6d28d9; font-size: 0.78rem; }
+    body.body--dark .salary-pill { color: #c4b5fd; }
     .job-primary { font-weight: 600; color: var(--app-text); }
     .job-secondary { color: var(--app-muted); font-size: 0.88rem; }
     .detail-grid { display: grid; grid-template-columns: 1.2fr 0.8fr 1fr; gap: 1rem; }
@@ -625,6 +627,11 @@ class JobMatchUI:
                     else:
                         ui.label(resume.filename).classes("text-lg font-semibold")
                         ui.label(f"Estimated experience: {resume.experience_years:.1f} years").classes("muted-copy")
+                        if resume.recent_titles:
+                            ui.label("Recent titles").classes("section-label mt-3")
+                            with ui.element("div").classes("chip-row mt-2"):
+                                for title in resume.recent_titles[:8]:
+                                    ui.html(f'<span class="skill-chip">{title}</span>', sanitize=False)
                         ui.label("Skills").classes("section-label mt-3")
                         with ui.element("div").classes("chip-row mt-2"):
                             for skill in resume.skills[:24]:
@@ -633,6 +640,16 @@ class JobMatchUI:
                         with ui.element("div").classes("chip-row mt-2"):
                             for tool in resume.tools[:20]:
                                 ui.html(f'<span class="skill-chip">{tool}</span>', sanitize=False)
+                        if resume.certifications:
+                            ui.label("Certifications").classes("section-label mt-4")
+                            with ui.element("div").classes("chip-row mt-2"):
+                                for certification in resume.certifications[:16]:
+                                    ui.html(f'<span class="skill-chip">{certification}</span>', sanitize=False)
+                        if resume.clearance_terms:
+                            ui.label("Clearance").classes("section-label mt-4")
+                            with ui.element("div").classes("chip-row mt-2"):
+                                for clearance in resume.clearance_terms:
+                                    ui.html(f'<span class="skill-chip">{clearance}</span>', sanitize=False)
                         ui.label("Parsed summary").classes("section-label mt-4")
                         ui.textarea(value=resume.summary_text, label=None).props("outlined readonly autogrow").classes("w-full resume-copy")
 
@@ -1513,6 +1530,8 @@ class JobMatchUI:
             {"name": "location", "label": "Location", "field": "location", "sortable": True},
             {"name": "remote_mode", "label": "Remote", "field": "remote_mode", "sortable": True},
             {"name": "job_type", "label": "Type", "field": "job_type", "sortable": True},
+            {"name": "salary_text", "label": "Salary", "field": "salary_text", "sortable": True},
+            {"name": "open_action", "label": "", "field": "open_action"},
         ]
         table = ui.table(rows=rows, columns=columns, row_key="id", pagination={"rowsPerPage": 18, "sortBy": "score_value", "descending": True}).classes("w-full")
         table.props("flat square separator=horizontal")
@@ -1536,6 +1555,22 @@ class JobMatchUI:
               <q-td key="location" :props="props">{{ props.row.location }}</q-td>
               <q-td key="remote_mode" :props="props">{{ props.row.remote_mode }}</q-td>
               <q-td key="job_type" :props="props">{{ props.row.job_type }}</q-td>
+              <q-td key="salary_text" :props="props">
+                <span v-if="props.row.salary_text" class="salary-pill">{{ props.row.salary_text }}</span>
+                <span v-else class="job-secondary">-</span>
+              </q-td>
+              <q-td key="open_action" :props="props" auto-width>
+                <q-btn
+                  color="primary"
+                  dense
+                  unelevated
+                  no-caps
+                  icon-right="open_in_new"
+                  label="Open"
+                  :href="props.row.url"
+                  target="_blank"
+                />
+              </q-td>
             </q-tr>
             <q-tr v-show="props.expand" :props="props">
               <q-td colspan="100%">
@@ -1553,9 +1588,20 @@ class JobMatchUI:
                   <div class="detail-block">
                     <div class="detail-title">Posting Details</div>
                     <div class="detail-copy">Source: {{ props.row.source_name }}</div>
+                    <div class="detail-copy">Salary: {{ props.row.salary_text || 'Not provided' }}</div>
                     <div class="detail-copy">Clearance: {{ props.row.clearance }}</div>
                     <div class="detail-copy">Posted: {{ props.row.posted_at }}</div>
-                    <div class="detail-copy" style="margin-top: 0.5rem;"><a :href="props.row.url" target="_blank">Open posting</a></div>
+                    <div style="margin-top: 0.75rem;">
+                      <q-btn
+                        color="primary"
+                        unelevated
+                        no-caps
+                        icon-right="open_in_new"
+                        label="Open posting"
+                        :href="props.row.url"
+                        target="_blank"
+                      />
+                    </div>
                   </div>
                 </div>
                 <div class="detail-block" style="margin-top: 1rem;">
@@ -1583,6 +1629,7 @@ class JobMatchUI:
             "location": match.job.location or "Unspecified",
             "remote_mode": match.job.remote_mode,
             "job_type": match.job.job_type or "unspecified",
+            "salary_text": match.job.salary_text or "",
             "matched_summary": matched_summary,
             "matched_skills": matched_skills,
             "missing_skills": missing_skills,

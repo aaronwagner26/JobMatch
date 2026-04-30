@@ -45,13 +45,26 @@ class JobMatcher:
                 resume_skills=resume.skills,
                 job_required_skills=job.required_skills,
                 job_preferred_skills=job.preferred_skills,
+                job_all_skills=job.skills,
                 resume_experience_years=resume.experience_years,
                 job_experience_years=job.experience_years,
             )
             target_skills = job.required_skills or job.skills
             matched_skills = sorted([skill for skill in target_skills if skill in resume_skill_set], key=str.casefold)
             missing_skills = sorted([skill for skill in target_skills if skill not in resume_skill_set], key=str.casefold)
-            reasons = self._build_reasons(job, embedding_score, skill_score, experience_score, matched_skills, missing_skills)
+            matched_clearance = sorted(
+                [term for term in job.clearance_terms if term in set(resume.clearance_terms)],
+                key=str.casefold,
+            )
+            reasons = self._build_reasons(
+                job,
+                embedding_score,
+                skill_score,
+                experience_score,
+                matched_skills,
+                missing_skills,
+                matched_clearance,
+            )
             results.append(
                 MatchResult(
                     job_id=job.id,
@@ -93,6 +106,7 @@ class JobMatcher:
         experience_score: float,
         matched_skills: list[str],
         missing_skills: list[str],
+        matched_clearance: list[str],
     ) -> list[str]:
         reasons = [
             f"Semantic fit scored {embedding_score * 100:.0f}% based on the resume summary and job description.",
@@ -105,4 +119,10 @@ class JobMatcher:
             reasons.append(f"Missing skills: {', '.join(missing_skills[:8])}.")
         elif job.required_skills:
             reasons.append("No obvious required-skill gaps were detected from the extracted posting text.")
+        if matched_clearance:
+            reasons.append(f"Clearance alignment: matched {', '.join(matched_clearance)}.")
+        elif job.clearance_terms:
+            reasons.append(f"Extracted clearance requirement: {', '.join(job.clearance_terms)}.")
+        if job.salary_text:
+            reasons.append(f"Extracted compensation: {job.salary_text}.")
         return reasons

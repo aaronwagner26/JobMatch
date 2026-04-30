@@ -82,6 +82,9 @@ class Storage:
                 summary_text=resume.summary_text,
                 skills=resume.skills,
                 tools=resume.tools,
+                certifications=resume.certifications,
+                clearance_terms=resume.clearance_terms,
+                recent_titles=resume.recent_titles,
                 experience_years=resume.experience_years,
                 experience_spans=resume.experience_spans,
                 sections=resume.sections,
@@ -282,6 +285,11 @@ class Storage:
                         remote_mode=job.remote_mode,
                         job_type=job.job_type,
                         clearance_terms=job.clearance_terms,
+                        salary_min=job.salary_min,
+                        salary_max=job.salary_max,
+                        salary_currency=job.salary_currency,
+                        salary_interval=job.salary_interval,
+                        salary_text=job.salary_text,
                         posted_at=job.posted_at,
                         url=job.url,
                         description=job.description,
@@ -315,6 +323,11 @@ class Storage:
                 record.remote_mode = job.remote_mode
                 record.job_type = job.job_type
                 record.clearance_terms = job.clearance_terms
+                record.salary_min = job.salary_min
+                record.salary_max = job.salary_max
+                record.salary_currency = job.salary_currency
+                record.salary_interval = job.salary_interval
+                record.salary_text = job.salary_text
                 record.posted_at = job.posted_at
                 record.url = job.url
                 record.description = job.description
@@ -360,6 +373,11 @@ class Storage:
                         remote_mode=job.remote_mode,
                         job_type=job.job_type,
                         clearance_terms=job.clearance_terms,
+                        salary_min=job.salary_min,
+                        salary_max=job.salary_max,
+                        salary_currency=job.salary_currency,
+                        salary_interval=job.salary_interval,
+                        salary_text=job.salary_text,
                         posted_at=job.posted_at,
                         url=job.url,
                         description=job.description,
@@ -393,6 +411,11 @@ class Storage:
                 record.remote_mode = job.remote_mode
                 record.job_type = job.job_type
                 record.clearance_terms = job.clearance_terms
+                record.salary_min = job.salary_min
+                record.salary_max = job.salary_max
+                record.salary_currency = job.salary_currency
+                record.salary_interval = job.salary_interval
+                record.salary_text = job.salary_text
                 record.posted_at = job.posted_at
                 record.url = job.url
                 record.description = job.description
@@ -446,10 +469,22 @@ class Storage:
 
     def _migrate_db(self) -> None:
         inspector = inspect(self.engine)
+        statements: list[str] = []
+        if inspector.has_table("resumes"):
+            resume_columns = {column["name"] for column in inspector.get_columns("resumes")}
+            if "certifications" not in resume_columns:
+                statements.append("ALTER TABLE resumes ADD COLUMN certifications JSON")
+            if "clearance_terms" not in resume_columns:
+                statements.append("ALTER TABLE resumes ADD COLUMN clearance_terms JSON")
+            if "recent_titles" not in resume_columns:
+                statements.append("ALTER TABLE resumes ADD COLUMN recent_titles JSON")
         if not inspector.has_table("sources"):
+            if statements:
+                with self.engine.begin() as connection:
+                    for statement in statements:
+                        connection.exec_driver_sql(statement)
             return
         source_columns = {column["name"] for column in inspector.get_columns("sources")}
-        statements: list[str] = []
         if "max_pages" not in source_columns:
             statements.append(f"ALTER TABLE sources ADD COLUMN max_pages INTEGER DEFAULT {DEFAULT_SOURCE_MAX_PAGES}")
         if "request_delay_ms" not in source_columns:
@@ -458,6 +493,18 @@ class Storage:
             )
         if "use_browser_profile" not in source_columns:
             statements.append("ALTER TABLE sources ADD COLUMN use_browser_profile BOOLEAN DEFAULT 0")
+        if inspector.has_table("jobs"):
+            job_columns = {column["name"] for column in inspector.get_columns("jobs")}
+            if "salary_min" not in job_columns:
+                statements.append("ALTER TABLE jobs ADD COLUMN salary_min FLOAT")
+            if "salary_max" not in job_columns:
+                statements.append("ALTER TABLE jobs ADD COLUMN salary_max FLOAT")
+            if "salary_currency" not in job_columns:
+                statements.append("ALTER TABLE jobs ADD COLUMN salary_currency VARCHAR(16)")
+            if "salary_interval" not in job_columns:
+                statements.append("ALTER TABLE jobs ADD COLUMN salary_interval VARCHAR(16)")
+            if "salary_text" not in job_columns:
+                statements.append("ALTER TABLE jobs ADD COLUMN salary_text VARCHAR(120)")
         if not statements:
             return
         with self.engine.begin() as connection:
@@ -475,6 +522,9 @@ class Storage:
             summary_text=record.summary_text,
             skills=list(record.skills or []),
             tools=list(record.tools or []),
+            certifications=list(getattr(record, "certifications", None) or []),
+            clearance_terms=list(getattr(record, "clearance_terms", None) or []),
+            recent_titles=list(getattr(record, "recent_titles", None) or []),
             experience_years=float(record.experience_years or 0.0),
             experience_spans=list(record.experience_spans or []),
             sections=dict(record.sections or {}),
@@ -521,6 +571,11 @@ class Storage:
             remote_mode=record.remote_mode,
             job_type=record.job_type,
             clearance_terms=list(record.clearance_terms or []),
+            salary_min=getattr(record, "salary_min", None),
+            salary_max=getattr(record, "salary_max", None),
+            salary_currency=getattr(record, "salary_currency", None),
+            salary_interval=getattr(record, "salary_interval", None),
+            salary_text=getattr(record, "salary_text", None),
             posted_at=record.posted_at,
             url=record.url,
             description=record.description,

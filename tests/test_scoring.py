@@ -11,6 +11,7 @@ def test_hybrid_scorer_weights_signal_sources() -> None:
         resume_skills=["Python", "AWS", "Docker"],
         job_required_skills=["Python", "Docker"],
         job_preferred_skills=["Kubernetes"],
+        job_all_skills=["Python", "Docker", "Kubernetes"],
         resume_experience_years=6.0,
         job_experience_years=5.0,
     )
