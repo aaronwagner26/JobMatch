@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -194,14 +195,29 @@ def _request_token(request: Request, payload: dict[str, Any]) -> str:
 @app.get("/api/browser-capture/status")
 async def browser_capture_status(request: Request) -> dict[str, Any]:
     server_origin = str(request.base_url).rstrip("/")
+    application_profile = ENGINE.get_active_application_profile() or {}
+    basics = dict(application_profile.get("basics") or {})
     return {
         "ok": True,
         "app": APP_NAME,
         "capture_endpoint": "/api/browser-capture",
+        "application_profile_endpoint": "/api/application-profile",
         "server_origin": server_origin,
         "browser_token": ENGINE.get_browser_api_token(),
         "token_required": True,
+        "active_resume_name": basics.get("full_name") or "",
     }
+
+
+@app.get("/api/application-profile")
+async def application_profile(request: Request) -> dict[str, Any]:
+    token = _request_token(request, {})
+    if token != ENGINE.get_browser_api_token():
+        raise HTTPException(status_code=401, detail="Invalid browser capture token.")
+    profile = ENGINE.get_active_application_profile()
+    if not profile:
+        raise HTTPException(status_code=404, detail="No active resume profile is available.")
+    return {"ok": True, "profile": profile}
 
 
 @app.post("/api/browser-capture")
@@ -244,6 +260,8 @@ class UIState:
     manual_job_urls: str = ""
     discovery_query: str = ""
     discovery_results: list[dict[str, Any]] = field(default_factory=list)
+    resume_form_resume_id: int | None = None
+    resume_form: dict[str, Any] = field(default_factory=dict)
     source_form: dict[str, Any] = field(
         default_factory=lambda: {
             "id": None,
@@ -281,6 +299,7 @@ class JobMatchUI:
         self._background_tasks: list[asyncio.Task] = []
         self.source_inputs: dict[str, Any] = {}
         self.settings_inputs: dict[str, Any] = {}
+        self.resume_inputs: dict[str, Any] = {}
         self.browser_token_input = None
 
     def mount(self) -> None:
@@ -724,11 +743,14 @@ class JobMatchUI:
 
     def render_resume(self) -> None:
         resume = self.engine.get_active_resume()
+        self._ensure_resume_form(resume)
         with ui.column().classes("w-full gap-4"):
             with ui.row().classes("w-full items-end justify-between"):
                 with ui.column().classes("gap-1"):
                     ui.label("Resume").classes("page-title")
-                    ui.label("Upload a PDF or DOCX once, then reuse the parsed profile across scans.").classes("page-subtitle")
+                    ui.label("Upload once, then correct the parsed application profile so matching and autofill use the same structured data.").classes("page-subtitle")
+                if resume:
+                    ui.button("Save profile edits", icon="save", on_click=self.save_resume_profile).props("unelevated")
 
             with ui.grid(columns=2).classes("w-full gap-4"):
                 with ui.element("section").classes("panel"):
@@ -739,7 +761,7 @@ class JobMatchUI:
                         on_upload=lambda e: asyncio.create_task(self.handle_resume_upload(e)),
                         on_rejected=lambda: self._notify("Resume upload rejected.", type="negative"),
                     ).props("accept=.pdf,.docx,.txt bordered").classes("w-full")
-                    ui.label("Supported formats: PDF and DOCX. The active resume is parsed and stored locally.").classes("mt-3 muted-copy")
+                    ui.label("Supported formats: PDF and DOCX. Uploading replaces the active structured profile, which you can then edit below.").classes("mt-3 muted-copy")
 
                 with ui.element("section").classes("panel"):
                     if not resume:
@@ -747,31 +769,206 @@ class JobMatchUI:
                     else:
                         ui.label(resume.filename).classes("text-lg font-semibold")
                         ui.label(f"Estimated experience: {resume.experience_years:.1f} years").classes("muted-copy")
-                        if resume.recent_titles:
-                            ui.label("Recent titles").classes("section-label mt-3")
-                            with ui.element("div").classes("chip-row mt-2"):
-                                for title in resume.recent_titles[:8]:
-                                    ui.html(f'<span class="skill-chip">{title}</span>', sanitize=False)
-                        ui.label("Skills").classes("section-label mt-3")
-                        with ui.element("div").classes("chip-row mt-2"):
-                            for skill in resume.skills[:24]:
-                                ui.html(f'<span class="skill-chip">{skill}</span>', sanitize=False)
-                        ui.label("Tools").classes("section-label mt-4")
-                        with ui.element("div").classes("chip-row mt-2"):
-                            for tool in resume.tools[:20]:
-                                ui.html(f'<span class="skill-chip">{tool}</span>', sanitize=False)
-                        if resume.certifications:
-                            ui.label("Certifications").classes("section-label mt-4")
-                            with ui.element("div").classes("chip-row mt-2"):
-                                for certification in resume.certifications[:16]:
-                                    ui.html(f'<span class="skill-chip">{certification}</span>', sanitize=False)
-                        if resume.clearance_terms:
-                            ui.label("Clearance").classes("section-label mt-4")
-                            with ui.element("div").classes("chip-row mt-2"):
-                                for clearance in resume.clearance_terms:
-                                    ui.html(f'<span class="skill-chip">{clearance}</span>', sanitize=False)
-                        ui.label("Parsed summary").classes("section-label mt-4")
-                        ui.textarea(value=resume.summary_text, label=None).props("outlined readonly autogrow").classes("w-full resume-copy")
+                        basics = self.state.resume_form.get("basics", {})
+                        if basics.get("full_name"):
+                            ui.label(str(basics.get("full_name"))).classes("text-base font-medium mt-2")
+                        metric_line = []
+                        if basics.get("headline"):
+                            metric_line.append(str(basics.get("headline")))
+                        if basics.get("email"):
+                            metric_line.append(str(basics.get("email")))
+                        if metric_line:
+                            ui.label(" • ".join(metric_line)).classes("muted-copy")
+                        with ui.element("div").classes("chip-row mt-3"):
+                            ui.html(f'<span class="skill-chip">{len(self.state.resume_form.get("work_history", []))} jobs</span>', sanitize=False)
+                            ui.html(f'<span class="skill-chip">{len(self.state.resume_form.get("education", []))} education entries</span>', sanitize=False)
+                            ui.html(f'<span class="skill-chip">{len(self.state.resume_form.get("skills", []))} skills</span>', sanitize=False)
+                            if resume.clearance_terms:
+                                ui.html(f'<span class="skill-chip">{", ".join(resume.clearance_terms[:2])}</span>', sanitize=False)
+
+            if not resume:
+                return
+
+            basics = self.state.resume_form["basics"]
+            with ui.element("section").classes("panel"):
+                ui.label("Application profile").classes("text-lg font-semibold")
+                ui.label("These fields power both matching and the browser extension fill actions. Adjust them when the parser gets something wrong.").classes("page-subtitle mt-1")
+                with ui.grid(columns=2).classes("w-full gap-4 mt-4"):
+                    ui.input("Full name", value=basics.get("full_name", ""), on_change=lambda e: self._update_resume_basic("full_name", e.value)).props("outlined").classes("w-full")
+                    ui.input("Headline", value=basics.get("headline", ""), on_change=lambda e: self._update_resume_basic("headline", e.value)).props("outlined").classes("w-full")
+                    ui.input("Email", value=basics.get("email", ""), on_change=lambda e: self._update_resume_basic("email", e.value)).props("outlined").classes("w-full")
+                    ui.input("Phone", value=basics.get("phone", ""), on_change=lambda e: self._update_resume_basic("phone", e.value)).props("outlined").classes("w-full")
+                    ui.input("Location", value=basics.get("location", ""), on_change=lambda e: self._update_resume_basic("location", e.value)).props("outlined").classes("w-full")
+                    ui.number("Years of experience", value=float(basics.get("years_experience", 0.0) or 0.0), min=0, step=0.5, on_change=lambda e: self._update_resume_basic("years_experience", e.value or 0)).props("outlined").classes("w-full")
+                    ui.input("LinkedIn URL", value=basics.get("linkedin_url", ""), on_change=lambda e: self._update_resume_basic("linkedin_url", e.value)).props("outlined").classes("w-full")
+                    ui.input("Website URL", value=basics.get("website_url", ""), on_change=lambda e: self._update_resume_basic("website_url", e.value)).props("outlined").classes("w-full")
+                ui.textarea("Professional summary", value=basics.get("summary", ""), on_change=lambda e: self._update_resume_basic("summary", e.value or "")).props("outlined autogrow").classes("w-full mt-4")
+
+            with ui.element("div").classes("sources-grid"):
+                with ui.element("section").classes("panel"):
+                    with ui.row().classes("w-full items-center justify-between"):
+                        ui.label("Work history").classes("text-lg font-semibold")
+                        ui.button("Add job", icon="add", on_click=self.add_resume_work_history).props("flat")
+                    work_history = self.state.resume_form.get("work_history", [])
+                    if not work_history:
+                        ui.label("No work history entries yet. Add one or upload a resume with an experience section.").classes("muted-copy mt-3")
+                    for index, item in enumerate(work_history):
+                        with ui.element("div").classes("panel-tight mt-3").style("border: 1px solid var(--app-border); border-radius: 14px;"):
+                            with ui.row().classes("w-full items-center justify-between"):
+                                ui.label(f"Job {index + 1}").classes("section-label")
+                                ui.button(icon="delete", on_click=lambda idx=index: self.remove_resume_work_history(idx)).props("flat round dense color=negative")
+                            with ui.grid(columns=2).classes("w-full gap-3 mt-2"):
+                                ui.input("Title", value=item.get("title", ""), on_change=lambda e, idx=index: self._update_resume_work_history(idx, "title", e.value)).props("outlined dense").classes("w-full")
+                                ui.input("Company", value=item.get("company", ""), on_change=lambda e, idx=index: self._update_resume_work_history(idx, "company", e.value)).props("outlined dense").classes("w-full")
+                                ui.input("Location", value=item.get("location", ""), on_change=lambda e, idx=index: self._update_resume_work_history(idx, "location", e.value)).props("outlined dense").classes("w-full")
+                                ui.switch("Current role", value=bool(item.get("is_current", False)), on_change=lambda e, idx=index: self._update_resume_work_history(idx, "is_current", bool(e.value))).classes("mt-2")
+                                ui.input("Start date", value=item.get("start_date", ""), on_change=lambda e, idx=index: self._update_resume_work_history(idx, "start_date", e.value)).props("outlined dense").classes("w-full")
+                                ui.input("End date", value=item.get("end_date", ""), on_change=lambda e, idx=index: self._update_resume_work_history(idx, "end_date", e.value)).props("outlined dense").classes("w-full")
+                            ui.textarea("Description / highlights", value=item.get("description", ""), on_change=lambda e, idx=index: self._update_resume_work_history(idx, "description", e.value or "")).props("outlined autogrow dense").classes("w-full mt-3")
+
+                with ui.element("section").classes("panel"):
+                    with ui.row().classes("w-full items-center justify-between"):
+                        ui.label("Education").classes("text-lg font-semibold")
+                        ui.button("Add education", icon="add", on_click=self.add_resume_education).props("flat")
+                    education = self.state.resume_form.get("education", [])
+                    if not education:
+                        ui.label("No education entries yet. Add one if the parser missed your degree or certification history.").classes("muted-copy mt-3")
+                    for index, item in enumerate(education):
+                        with ui.element("div").classes("panel-tight mt-3").style("border: 1px solid var(--app-border); border-radius: 14px;"):
+                            with ui.row().classes("w-full items-center justify-between"):
+                                ui.label(f"Education {index + 1}").classes("section-label")
+                                ui.button(icon="delete", on_click=lambda idx=index: self.remove_resume_education(idx)).props("flat round dense color=negative")
+                            with ui.grid(columns=2).classes("w-full gap-3 mt-2"):
+                                ui.input("School", value=item.get("school", ""), on_change=lambda e, idx=index: self._update_resume_education(idx, "school", e.value)).props("outlined dense").classes("w-full")
+                                ui.input("Degree", value=item.get("degree", ""), on_change=lambda e, idx=index: self._update_resume_education(idx, "degree", e.value)).props("outlined dense").classes("w-full")
+                                ui.input("Field of study", value=item.get("field_of_study", ""), on_change=lambda e, idx=index: self._update_resume_education(idx, "field_of_study", e.value)).props("outlined dense").classes("w-full")
+                                ui.input("Start date", value=item.get("start_date", ""), on_change=lambda e, idx=index: self._update_resume_education(idx, "start_date", e.value)).props("outlined dense").classes("w-full")
+                                ui.input("End date", value=item.get("end_date", ""), on_change=lambda e, idx=index: self._update_resume_education(idx, "end_date", e.value)).props("outlined dense").classes("w-full")
+                            ui.textarea("Notes", value=item.get("description", ""), on_change=lambda e, idx=index: self._update_resume_education(idx, "description", e.value or "")).props("outlined autogrow dense").classes("w-full mt-3")
+
+            with ui.grid(columns=2).classes("w-full gap-4"):
+                with ui.element("section").classes("panel"):
+                    ui.label("Skills and tools").classes("text-lg font-semibold")
+                    ui.textarea("Skills", value=", ".join(self.state.resume_form.get("skills", [])), on_change=lambda e: self._update_resume_list("skills", e.value)).props("outlined autogrow").classes("w-full mt-3")
+                    ui.textarea("Tools and platforms", value=", ".join(self.state.resume_form.get("tools", [])), on_change=lambda e: self._update_resume_list("tools", e.value)).props("outlined autogrow").classes("w-full mt-3")
+                with ui.element("section").classes("panel"):
+                    ui.label("Credentials").classes("text-lg font-semibold")
+                    ui.textarea("Certifications", value=", ".join(self.state.resume_form.get("certifications", [])), on_change=lambda e: self._update_resume_list("certifications", e.value)).props("outlined autogrow").classes("w-full mt-3")
+                    ui.textarea("Clearance", value=", ".join(self.state.resume_form.get("clearance_terms", [])), on_change=lambda e: self._update_resume_list("clearance_terms", e.value)).props("outlined autogrow").classes("w-full mt-3")
+
+            with ui.element("section").classes("panel"):
+                ui.label("Matcher summary").classes("text-lg font-semibold")
+                ui.label("This is the generated text used for embeddings and ranking. Saving profile edits rebuilds it from the structured profile.").classes("page-subtitle mt-1")
+                ui.textarea(value=resume.summary_text, label=None).props("outlined readonly autogrow").classes("w-full resume-copy mt-3")
+
+    def _ensure_resume_form(self, resume: ResumeProfile | None) -> None:
+        if resume is None:
+            self.state.resume_form_resume_id = None
+            self.state.resume_form = {}
+            return
+        if self.state.resume_form_resume_id == resume.id and self.state.resume_form:
+            return
+        self.state.resume_form_resume_id = resume.id
+        self.state.resume_form = self._resume_form_from_profile(resume)
+
+    @staticmethod
+    def _resume_form_from_profile(resume: ResumeProfile) -> dict[str, Any]:
+        profile = dict(resume.application_profile or {})
+        basics = dict(profile.get("basics") or {})
+        return {
+            "basics": {
+                "full_name": str(basics.get("full_name") or ""),
+                "email": str(basics.get("email") or ""),
+                "phone": str(basics.get("phone") or ""),
+                "location": str(basics.get("location") or ""),
+                "linkedin_url": str(basics.get("linkedin_url") or ""),
+                "website_url": str(basics.get("website_url") or ""),
+                "headline": str(basics.get("headline") or (resume.recent_titles[0] if resume.recent_titles else "")),
+                "summary": str(basics.get("summary") or resume.sections.get("summary", "")),
+                "years_experience": float(basics.get("years_experience") or profile.get("experience_years") or resume.experience_years or 0.0),
+            },
+            "work_history": [dict(item) for item in (profile.get("work_history") or []) if isinstance(item, dict)],
+            "education": [dict(item) for item in (profile.get("education") or []) if isinstance(item, dict)],
+            "skills": list(profile.get("skills") or resume.skills),
+            "tools": list(profile.get("tools") or resume.tools),
+            "certifications": list(profile.get("certifications") or resume.certifications),
+            "clearance_terms": list(profile.get("clearance_terms") or resume.clearance_terms),
+            "experience_years": float(profile.get("experience_years") or resume.experience_years or 0.0),
+        }
+
+    def _update_resume_basic(self, key: str, value: Any) -> None:
+        basics = self.state.resume_form.setdefault("basics", {})
+        basics[key] = value
+        if key == "years_experience":
+            self.state.resume_form["experience_years"] = float(value or 0.0)
+
+    def _update_resume_list(self, key: str, value: str) -> None:
+        parts = [normalize_whitespace(part) for part in re.split(r"[\n,;]+", value or "")]
+        self.state.resume_form[key] = [part for part in parts if part]
+
+    def _update_resume_work_history(self, index: int, key: str, value: Any) -> None:
+        work_history = self.state.resume_form.setdefault("work_history", [])
+        if 0 <= index < len(work_history):
+            work_history[index][key] = value
+
+    def _update_resume_education(self, index: int, key: str, value: Any) -> None:
+        education = self.state.resume_form.setdefault("education", [])
+        if 0 <= index < len(education):
+            education[index][key] = value
+
+    def add_resume_work_history(self) -> None:
+        self.state.resume_form.setdefault("work_history", []).append(
+            {
+                "title": "",
+                "company": "",
+                "location": "",
+                "start_date": "",
+                "end_date": "",
+                "is_current": False,
+                "description": "",
+            }
+        )
+        if self.state.current_view == "resume":
+            self.render_current_view()
+
+    def remove_resume_work_history(self, index: int) -> None:
+        work_history = self.state.resume_form.setdefault("work_history", [])
+        if 0 <= index < len(work_history):
+            work_history.pop(index)
+        if self.state.current_view == "resume":
+            self.render_current_view()
+
+    def add_resume_education(self) -> None:
+        self.state.resume_form.setdefault("education", []).append(
+            {
+                "school": "",
+                "degree": "",
+                "field_of_study": "",
+                "start_date": "",
+                "end_date": "",
+                "description": "",
+            }
+        )
+        if self.state.current_view == "resume":
+            self.render_current_view()
+
+    def remove_resume_education(self, index: int) -> None:
+        education = self.state.resume_form.setdefault("education", [])
+        if 0 <= index < len(education):
+            education.pop(index)
+        if self.state.current_view == "resume":
+            self.render_current_view()
+
+    def save_resume_profile(self) -> None:
+        try:
+            updated = self.engine.update_active_resume_profile(self.state.resume_form)
+            self.state.resume_form_resume_id = updated.id
+            self.state.resume_form = self._resume_form_from_profile(updated)
+            self._notify("Saved resume profile edits.", type="positive")
+            if self.state.current_view == "resume":
+                self.render_current_view()
+        except Exception as exc:
+            self._notify(f"Could not save resume profile: {exc}", type="negative")
 
     def render_settings(self) -> None:
         settings = self.engine.get_settings()
@@ -888,7 +1085,7 @@ class JobMatchUI:
                 with ui.element("section").classes("panel"):
                     ui.label("Browser Capture").classes("text-lg font-semibold")
                     ui.label(
-                        "Use the extension on the pages you actually browse, then send visible jobs into this local app."
+                        "Use the extension on the pages you actually browse, then either capture jobs or fill common application fields from the structured resume profile."
                     ).classes("mt-1 page-subtitle")
                     ui.input("Extension server URL", value="Use the same JobMatch URL you already opened").props(
                         "outlined readonly"
@@ -1129,8 +1326,11 @@ class JobMatchUI:
         self._append_activity(f"Importing resume {event.file.name}.")
         try:
             resume = await asyncio.to_thread(self.engine.save_resume, incoming_path)
+            self.state.resume_form_resume_id = None
             self._append_activity(f"Loaded resume: {resume.filename}.")
             self.render_sidebar()
+            if self.state.current_view == "resume":
+                self.render_current_view()
             await self.refresh_matches(record_activity=True)
         except Exception as exc:
             self.state.match_error = str(exc)

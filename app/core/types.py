@@ -21,6 +21,7 @@ class ResumeProfile:
     experience_years: float
     experience_spans: list[dict[str, str]]
     sections: dict[str, str]
+    application_profile: dict[str, Any] = field(default_factory=dict)
     embedding: list[float] | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None

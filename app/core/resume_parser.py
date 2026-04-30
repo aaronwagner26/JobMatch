@@ -55,6 +55,11 @@ TITLE_KEYWORDS = {
     "technician",
 }
 COMPANY_HINTS = {"inc", "llc", "corp", "corporation", "ltd", "university", "systems", "solutions", "company"}
+EMAIL_RE = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.IGNORECASE)
+PHONE_RE = re.compile(r"(?:\+?1[\s.-]?)?(?:\(?\d{3}\)?[\s.-]?)\d{3}[\s.-]?\d{4}")
+URL_RE = re.compile(r"(https?://[^\s]+|www\.[^\s]+)", re.IGNORECASE)
+LINKEDIN_RE = re.compile(r"(https?://(?:www\.)?linkedin\.com/[^\s]+|linkedin\.com/[^\s]+)", re.IGNORECASE)
+DEGREE_KEYWORDS = ("bachelor", "master", "associate", "phd", "doctor", "certificate", "certification", "b.s", "b.a", "m.s", "m.a")
 
 
 class ResumeParser:
@@ -117,6 +122,17 @@ class ResumeParser:
             if enrichment.get("experience_years_hint"):
                 experience_years = max(experience_years, float(enrichment["experience_years_hint"]))
             llm_summary = normalize_whitespace(str(enrichment.get("summary") or ""))
+        application_profile = self._build_application_profile(
+            lines=cleaned_lines,
+            sections=sections,
+            skills=skills,
+            tools=tools,
+            certifications=certifications,
+            clearance_terms=list(clearance_info["terms"]),
+            recent_titles=recent_titles,
+            experience_years=experience_years,
+            experience_spans=experience_spans,
+        )
         summary_text = self._build_summary(
             sections=sections,
             skills=skills,
@@ -125,6 +141,7 @@ class ResumeParser:
             clearance_terms=list(clearance_info["terms"]),
             recent_titles=recent_titles,
             experience_years=experience_years,
+            application_profile=application_profile,
             llm_summary=llm_summary,
         )
 
@@ -143,6 +160,7 @@ class ResumeParser:
             experience_years=experience_years,
             experience_spans=experience_spans,
             sections=sections,
+            application_profile=application_profile,
         )
 
     @staticmethod
@@ -289,11 +307,15 @@ class ResumeParser:
         clearance_terms: list[str],
         recent_titles: list[str],
         experience_years: float,
+        application_profile: dict[str, object] | None = None,
         llm_summary: str = "",
     ) -> str:
         parts: list[str] = []
         if llm_summary:
             parts.append(f"Structured profile: {llm_summary}")
+        basics = dict((application_profile or {}).get("basics") or {})
+        if basics.get("headline"):
+            parts.append(f"Headline: {basics['headline']}")
         if recent_titles:
             parts.append(f"Recent titles: {', '.join(recent_titles[:6])}")
         if skills:
@@ -315,6 +337,211 @@ class ResumeParser:
         if sections.get("projects"):
             parts.append(f"Projects: {sections['projects']}")
         return "\n".join(parts)
+
+    def _build_application_profile(
+        self,
+        *,
+        lines: list[str],
+        sections: dict[str, str],
+        skills: list[str],
+        tools: list[str],
+        certifications: list[str],
+        clearance_terms: list[str],
+        recent_titles: list[str],
+        experience_years: float,
+        experience_spans: list[dict[str, str]],
+    ) -> dict[str, object]:
+        basics = self._extract_basics(lines, sections, recent_titles, experience_years)
+        work_history = self._extract_work_history(sections.get("experience", ""), experience_spans)
+        education = self._extract_education(sections.get("education", ""))
+        return {
+            "basics": basics,
+            "work_history": work_history,
+            "education": education,
+            "skills": list(skills),
+            "tools": list(tools),
+            "certifications": list(certifications),
+            "clearance_terms": list(clearance_terms),
+            "recent_titles": list(recent_titles),
+            "experience_years": float(experience_years or 0.0),
+        }
+
+    def _extract_basics(
+        self,
+        lines: list[str],
+        sections: dict[str, str],
+        recent_titles: list[str],
+        experience_years: float,
+    ) -> dict[str, object]:
+        top_block = lines[:10]
+        joined = "\n".join(lines[:20])
+        full_name = ""
+        for line in top_block:
+            if EMAIL_RE.search(line) or PHONE_RE.search(line) or URL_RE.search(line):
+                continue
+            if len(line.split()) > 5:
+                continue
+            if self._match_section_header(line) is not None:
+                continue
+            if any(char.isdigit() for char in line):
+                continue
+            full_name = line
+            break
+        email = normalize_whitespace(EMAIL_RE.search(joined).group(0)) if EMAIL_RE.search(joined) else ""
+        phone = normalize_whitespace(PHONE_RE.search(joined).group(0)) if PHONE_RE.search(joined) else ""
+        linkedin = normalize_whitespace(LINKEDIN_RE.search(joined).group(0)) if LINKEDIN_RE.search(joined) else ""
+        urls = [normalize_whitespace(match.group(0)) for match in URL_RE.finditer(joined)]
+        website = next((url for url in urls if "linkedin.com" not in url.casefold()), "")
+        location = ""
+        for line in top_block:
+            if line in {full_name, email, phone, linkedin, website}:
+                continue
+            if EMAIL_RE.search(line) or PHONE_RE.search(line) or URL_RE.search(line):
+                continue
+            if "," in line and len(line) <= 80:
+                location = line
+                break
+        headline = recent_titles[0] if recent_titles else ""
+        summary = normalize_whitespace(sections.get("summary", "")) or ""
+        return {
+            "full_name": full_name,
+            "email": email,
+            "phone": phone,
+            "location": location,
+            "linkedin_url": linkedin,
+            "website_url": website,
+            "headline": headline,
+            "summary": summary,
+            "years_experience": float(experience_years or 0.0),
+        }
+
+    def _extract_work_history(self, experience_text: str, experience_spans: list[dict[str, str]]) -> list[dict[str, object]]:
+        if not experience_text:
+            return []
+        lines = [normalize_whitespace(line) for line in experience_text.splitlines() if normalize_whitespace(line)]
+        entries: list[dict[str, object]] = []
+        current: dict[str, object] | None = None
+        last_non_bullet = ""
+        for index, line in enumerate(lines):
+            date_match = DATE_RANGE_RE.search(line)
+            if date_match:
+                if current:
+                    entries.append(current)
+                prefix = self._clean_title_fragment(line[: date_match.start()])
+                title, company = self._split_title_company(prefix)
+                if not title and index > 0:
+                    title, company = self._split_title_company(last_non_bullet)
+                current = {
+                    "title": title,
+                    "company": company,
+                    "location": "",
+                    "start_date": self._date_text_to_iso(date_match.group("start")),
+                    "end_date": self._date_text_to_iso(date_match.group("end"), default_present=True),
+                    "is_current": date_match.group("end").strip().casefold() in {"present", "current", "now"},
+                    "description": "",
+                }
+                continue
+            if line.startswith(("-", "*", "\u2022")):
+                if current:
+                    bullet = line.lstrip("-*\u2022 ").strip()
+                    current["description"] = normalize_whitespace(
+                        f"{current.get('description', '')}\n{bullet}".strip()
+                    )
+                continue
+            last_non_bullet = line
+            if current and not current.get("company"):
+                title, company = self._split_title_company(line)
+                if company:
+                    if not current.get("title"):
+                        current["title"] = title
+                    current["company"] = company
+                    continue
+            if current and not current.get("location") and "," in line and len(line) <= 90:
+                current["location"] = line
+        if current:
+            entries.append(current)
+
+        deduped: list[dict[str, object]] = []
+        seen: set[tuple[str, str, str]] = set()
+        for entry in entries:
+            key = (
+                normalize_whitespace(str(entry.get("title") or "")).casefold(),
+                normalize_whitespace(str(entry.get("company") or "")).casefold(),
+                normalize_whitespace(str(entry.get("start_date") or "")).casefold(),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            if not entry.get("title") and not entry.get("company"):
+                continue
+            deduped.append(entry)
+        if deduped:
+            return deduped[:8]
+
+        fallback: list[dict[str, object]] = []
+        for span, title in zip(experience_spans[:4], recent_titles := self._extract_recent_titles(experience_text)[:4], strict=False):
+            fallback.append(
+                {
+                    "title": title,
+                    "company": "",
+                    "location": "",
+                    "start_date": span.get("start", ""),
+                    "end_date": span.get("end", ""),
+                    "is_current": span.get("label", "").casefold().endswith("present"),
+                    "description": "",
+                }
+            )
+        return fallback
+
+    def _extract_education(self, education_text: str) -> list[dict[str, object]]:
+        if not education_text:
+            return []
+        lines = [normalize_whitespace(line) for line in education_text.splitlines() if normalize_whitespace(line)]
+        entries: list[dict[str, object]] = []
+        current: dict[str, object] | None = None
+        for line in lines:
+            date_match = DATE_RANGE_RE.search(line)
+            looks_like_degree = any(keyword in line.casefold() for keyword in DEGREE_KEYWORDS)
+            if looks_like_degree or date_match:
+                if current:
+                    entries.append(current)
+                degree_text = self._clean_title_fragment(line[: date_match.start()]) if date_match else line
+                current = {
+                    "school": "",
+                    "degree": degree_text if looks_like_degree else "",
+                    "field_of_study": "",
+                    "start_date": self._date_text_to_iso(date_match.group("start")) if date_match else "",
+                    "end_date": self._date_text_to_iso(date_match.group("end"), default_present=True) if date_match else "",
+                    "description": "",
+                }
+                continue
+            if current and not current.get("school"):
+                current["school"] = line
+            elif current:
+                current["description"] = normalize_whitespace(f"{current.get('description', '')}\n{line}".strip())
+        if current:
+            entries.append(current)
+        if entries:
+            return entries[:6]
+        return [{"school": line, "degree": "", "field_of_study": "", "start_date": "", "end_date": "", "description": ""} for line in lines[:4]]
+
+    @staticmethod
+    def _split_title_company(value: str) -> tuple[str, str]:
+        text = normalize_whitespace(value)
+        if not text:
+            return "", ""
+        if "|" in text:
+            left, right = [normalize_whitespace(part) for part in text.split("|", 1)]
+            return left, right
+        if " at " in text.casefold():
+            parts = re.split(r"\bat\b", text, maxsplit=1, flags=re.IGNORECASE)
+            return normalize_whitespace(parts[0]), normalize_whitespace(parts[1]) if len(parts) > 1 else ""
+        return text, ""
+
+    @staticmethod
+    def _date_text_to_iso(value: str, *, default_present: bool = False) -> str:
+        parsed = ResumeParser._parse_partial_date(value, default_present=default_present)
+        return parsed.date().isoformat() if parsed else ""
 
     @staticmethod
     def _merge_lists(left: list[str], right: list[str] | None) -> list[str]:

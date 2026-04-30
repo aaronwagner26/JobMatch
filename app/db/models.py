@@ -31,6 +31,7 @@ class ResumeRecord(Base):
     experience_years: Mapped[float] = mapped_column(Float, default=0.0)
     experience_spans: Mapped[list[dict]] = mapped_column(JSON, default=list)
     sections: Mapped[dict] = mapped_column(JSON, default=dict)
+    application_profile: Mapped[dict] = mapped_column(JSON, default=dict)
     embedding: Mapped[list[float] | None] = mapped_column(JSON, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

@@ -5,6 +5,8 @@ const serverUrlInput = document.querySelector('#serverUrl');
 const tokenInput = document.querySelector('#token');
 const testButton = document.querySelector('#testButton');
 const captureButton = document.querySelector('#captureButton');
+const fillFormButton = document.querySelector('#fillFormButton');
+const fillFocusedButton = document.querySelector('#fillFocusedButton');
 const statusNode = document.querySelector('#status');
 
 void init();
@@ -16,6 +18,8 @@ async function init() {
 
   testButton.addEventListener('click', () => void testConnection());
   captureButton.addEventListener('click', () => void captureVisibleJobs());
+  fillFormButton.addEventListener('click', () => void fillApplication('common'));
+  fillFocusedButton.addEventListener('click', () => void fillApplication('focused'));
 
   if (!serverUrlInput.value) {
     const discovered = await discoverServerFromOpenTabs();
@@ -98,7 +102,7 @@ async function testConnection() {
       tokenInput.value = String(payload.browser_token);
     }
     await saveConfig();
-    setStatus(`Connected to ${payload.app}.\nPOST ${payload.capture_endpoint}`);
+    setStatus(`Connected to ${payload.app}.\nPOST ${payload.capture_endpoint}\nActive resume: ${payload.active_resume_name || 'not set'}`);
   } catch (error) {
     setStatus(`Connection failed.\n${errorMessage(error)}`);
   } finally {
@@ -159,6 +163,48 @@ async function captureVisibleJobs() {
   }
 }
 
+async function fillApplication(mode) {
+  setBusy(true);
+  try {
+    const config = await saveConfig();
+    if (!config.serverUrl) {
+      throw new Error('Enter the JobMatch server URL first.');
+    }
+    let token = config.token;
+    if (!token) {
+      const hydrated = await hydrateTokenFromServer(false);
+      token = hydrated.payload?.browser_token || tokenInput.value.trim();
+    }
+    if (!token) {
+      throw new Error('Could not obtain the browser capture token from JobMatch.');
+    }
+    const profilePayload = await fetchApplicationProfile(config.serverUrl, token);
+    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+    if (!tab?.id) {
+      throw new Error('Could not find the active tab.');
+    }
+    const response = await chrome.tabs.sendMessage(tab.id, {
+      type: 'jobmatch_fill_application',
+      mode,
+      profile: profilePayload.profile,
+    });
+    if (!response?.ok) {
+      throw new Error(response?.error || 'Could not fill fields on the current page.');
+    }
+    setStatus(
+      [
+        mode === 'focused' ? 'Filled focused field.' : 'Filled common application fields.',
+        `${response.filled || 0} field(s) updated`,
+        response.preview ? `Examples: ${response.preview}` : '',
+      ].filter(Boolean).join('\n')
+    );
+  } catch (error) {
+    setStatus(`Fill failed.\n${errorMessage(error)}`);
+  } finally {
+    setBusy(false);
+  }
+}
+
 async function discoverServerFromOpenTabs() {
   const tabs = await chrome.tabs.query({});
   const candidates = [];
@@ -199,6 +245,19 @@ async function fetchStatus(serverUrl) {
   return payload;
 }
 
+async function fetchApplicationProfile(serverUrl, token) {
+  const response = await fetch(`${normalizeServerUrl(serverUrl)}/api/application-profile`, {
+    headers: {
+      'Authorization': `Bearer ${token}`,
+    },
+  });
+  const payload = await response.json();
+  if (!response.ok) {
+    throw new Error(payload.detail || `HTTP ${response.status}`);
+  }
+  return payload;
+}
+
 function normalizeServerUrl(value) {
   const trimmed = String(value || '').trim().replace(/\/+$/, '');
   if (!trimmed) {
@@ -219,6 +278,8 @@ function errorMessage(error) {
 function setBusy(isBusy) {
   testButton.disabled = isBusy;
   captureButton.disabled = isBusy;
+  fillFormButton.disabled = isBusy;
+  fillFocusedButton.disabled = isBusy;
 }
 
 function setStatus(text) {

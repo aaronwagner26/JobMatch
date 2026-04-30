@@ -88,10 +88,34 @@ class Storage:
                 experience_years=resume.experience_years,
                 experience_spans=resume.experience_spans,
                 sections=resume.sections,
+                application_profile=resume.application_profile,
                 embedding=resume.embedding,
                 is_active=True,
             )
             session.add(record)
+            session.flush()
+            return self._resume_from_record(record)
+
+    def update_active_resume(self, resume: ResumeProfile) -> ResumeProfile:
+        with self.session() as session:
+            record = session.scalar(select(ResumeRecord).where(ResumeRecord.is_active.is_(True)).order_by(ResumeRecord.updated_at.desc()))
+            if record is None:
+                raise ValueError("No active resume is available to update.")
+            record.filename = resume.filename
+            record.file_path = resume.file_path
+            record.file_hash = resume.file_hash
+            record.raw_text = resume.raw_text
+            record.summary_text = resume.summary_text
+            record.skills = resume.skills
+            record.tools = resume.tools
+            record.certifications = resume.certifications
+            record.clearance_terms = resume.clearance_terms
+            record.recent_titles = resume.recent_titles
+            record.experience_years = resume.experience_years
+            record.experience_spans = resume.experience_spans
+            record.sections = resume.sections
+            record.application_profile = resume.application_profile
+            record.embedding = resume.embedding
             session.flush()
             return self._resume_from_record(record)
 
@@ -478,6 +502,8 @@ class Storage:
                 statements.append("ALTER TABLE resumes ADD COLUMN clearance_terms JSON")
             if "recent_titles" not in resume_columns:
                 statements.append("ALTER TABLE resumes ADD COLUMN recent_titles JSON")
+            if "application_profile" not in resume_columns:
+                statements.append("ALTER TABLE resumes ADD COLUMN application_profile JSON")
         if not inspector.has_table("sources"):
             if statements:
                 with self.engine.begin() as connection:
@@ -528,6 +554,7 @@ class Storage:
             experience_years=float(record.experience_years or 0.0),
             experience_spans=list(record.experience_spans or []),
             sections=dict(record.sections or {}),
+            application_profile=dict(getattr(record, "application_profile", None) or {}),
             embedding=list(record.embedding) if record.embedding else None,
             created_at=record.created_at,
             updated_at=record.updated_at,

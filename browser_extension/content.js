@@ -4,21 +4,36 @@ const DETAIL_CAPTURE_POLL_MS = 140;
 const MAX_CONSECUTIVE_DETAIL_SKIPS = 3;
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-  if (message?.type !== 'jobmatch_capture_page') {
-    return undefined;
+  if (message?.type === 'jobmatch_capture_page') {
+    void (async () => {
+      try {
+        sendResponse({ ok: true, payload: await captureCurrentPage() });
+      } catch (error) {
+        sendResponse({
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    })();
+    return true;
   }
 
-  void (async () => {
-    try {
-      sendResponse({ ok: true, payload: await captureCurrentPage() });
-    } catch (error) {
-      sendResponse({
-        ok: false,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-  })();
-  return true;
+  if (message?.type === 'jobmatch_fill_application') {
+    void (async () => {
+      try {
+        const result = fillApplicationFields(message.profile || {}, { mode: message.mode || 'common' });
+        sendResponse({ ok: true, ...result });
+      } catch (error) {
+        sendResponse({
+          ok: false,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    })();
+    return true;
+  }
+
+  return undefined;
 });
 
 async function captureCurrentPage() {
@@ -727,6 +742,296 @@ function formatSalaryAmount(value) {
     return String(value);
   }
   return value.toFixed(2);
+}
+
+function fillApplicationFields(profile, { mode = 'common' } = {}) {
+  const basics = profile?.basics || {};
+  const workHistory = Array.isArray(profile?.work_history) ? profile.work_history : [];
+  const education = Array.isArray(profile?.education) ? profile.education : [];
+  const targets = mode === 'focused'
+    ? [document.activeElement].filter((element) => isFillableField(element))
+    : Array.from(document.querySelectorAll('input, textarea, select')).filter((element) => isFillableField(element));
+  if (targets.length === 0) {
+    throw new Error(mode === 'focused' ? 'Focus a form field before using this action.' : 'No fillable fields were detected on this page.');
+  }
+
+  const counters = {};
+  let filled = 0;
+  const preview = [];
+  for (const element of targets) {
+    const context = classifyApplicationField(element);
+    if (!context) {
+      continue;
+    }
+    const value = valueForApplicationField(context, element, basics, workHistory, education, profile, counters);
+    if (!value) {
+      continue;
+    }
+    if (mode !== 'focused' && hasMeaningfulFieldValue(element)) {
+      continue;
+    }
+    if (applyFieldValue(element, value)) {
+      filled += 1;
+      if (preview.length < 5) {
+        preview.push(context.label);
+      }
+    }
+  }
+  if (filled === 0) {
+    throw new Error(mode === 'focused' ? 'Could not map the focused field to a structured resume value.' : 'No recognizable empty fields matched the structured resume profile.');
+  }
+  return { filled, preview: preview.join(', ') };
+}
+
+function classifyApplicationField(element) {
+  const context = fieldContextText(element);
+  if (!context) {
+    return null;
+  }
+  if (/\b(cover letter|why do you want|why are you|additional information|motivation|tell us why)\b/i.test(context)) {
+    return null;
+  }
+  const autocomplete = normalizeText(element.getAttribute('autocomplete') || '').toLowerCase();
+  if (autocomplete === 'name') return { kind: 'full_name', label: 'full name' };
+  if (autocomplete === 'given-name') return { kind: 'first_name', label: 'first name' };
+  if (autocomplete === 'family-name') return { kind: 'last_name', label: 'last name' };
+  if (autocomplete === 'email') return { kind: 'email', label: 'email' };
+  if (autocomplete === 'tel') return { kind: 'phone', label: 'phone' };
+  if (autocomplete === 'url') return { kind: 'website_url', label: 'website' };
+  if (autocomplete === 'postal-code') return { kind: 'postal_code', label: 'postal code' };
+  if (autocomplete === 'address-level2') return { kind: 'city', label: 'city' };
+  if (autocomplete === 'address-level1') return { kind: 'state', label: 'state' };
+
+  if (/\b(full name|legal name|applicant name|candidate name)\b/i.test(context)) return { kind: 'full_name', label: 'full name' };
+  if (/\b(first name|given name)\b/i.test(context)) return { kind: 'first_name', label: 'first name' };
+  if (/\b(last name|family name|surname)\b/i.test(context)) return { kind: 'last_name', label: 'last name' };
+  if (/\bemail\b/i.test(context)) return { kind: 'email', label: 'email' };
+  if (/\b(phone|mobile|cell)\b/i.test(context)) return { kind: 'phone', label: 'phone' };
+  if (/\blinkedin\b/i.test(context)) return { kind: 'linkedin_url', label: 'linkedin' };
+  if (/\b(portfolio|website|personal site|github url|homepage)\b/i.test(context)) return { kind: 'website_url', label: 'website' };
+  if (/\b(zip|postal code)\b/i.test(context)) return { kind: 'postal_code', label: 'postal code' };
+  if (/\bcity\b/i.test(context)) return { kind: 'city', label: 'city' };
+  if (/\bstate|province|region\b/i.test(context)) return { kind: 'state', label: 'state' };
+  if (/\b(address|location)\b/i.test(context)) return { kind: 'location', label: 'location' };
+  if (/\b(years? of experience|experience years?)\b/i.test(context)) return { kind: 'years_experience', label: 'years of experience' };
+  if (/\b(professional summary|summary|about you|bio)\b/i.test(context)) return { kind: 'summary', label: 'summary' };
+  if (/\bheadline|current title|professional title\b/i.test(context)) return { kind: 'headline', label: 'headline' };
+  if (/\bskills?|technologies|technical skills\b/i.test(context)) return { kind: 'skills', label: 'skills' };
+  if (/\btools?|platforms?\b/i.test(context)) return { kind: 'tools', label: 'tools' };
+  if (/\bcertifications?\b/i.test(context)) return { kind: 'certifications', label: 'certifications' };
+  if (/\bclearance|public trust|polygraph\b/i.test(context)) return { kind: 'clearance', label: 'clearance' };
+  if (/\b(company|employer|organization)\b/i.test(context) && /\b(work|employment|experience|current|previous|most recent)\b/i.test(context)) return { kind: 'job_company', label: 'job company' };
+  if (/\b(job title|title|position|role)\b/i.test(context) && /\b(work|employment|experience|current|previous|most recent)\b/i.test(context)) return { kind: 'job_title', label: 'job title' };
+  if (/\b(work|employment|experience).*\blocation\b|\blocation\b.*\b(work|employment|experience)\b/i.test(context)) return { kind: 'job_location', label: 'job location' };
+  if (/\b(start date|date started|from date)\b/i.test(context) && /\b(work|employment|experience)\b/i.test(context)) return { kind: 'job_start_date', label: 'job start date' };
+  if (/\b(end date|date ended|to date)\b/i.test(context) && /\b(work|employment|experience)\b/i.test(context)) return { kind: 'job_end_date', label: 'job end date' };
+  if (/\b(description|responsibilities|achievements)\b/i.test(context) && /\b(work|employment|experience)\b/i.test(context)) return { kind: 'job_description', label: 'job description' };
+  if (/\b(school|university|college)\b/i.test(context)) return { kind: 'edu_school', label: 'school' };
+  if (/\b(degree|credential)\b/i.test(context)) return { kind: 'edu_degree', label: 'degree' };
+  if (/\b(field of study|major|concentration)\b/i.test(context)) return { kind: 'edu_field', label: 'field of study' };
+  if (/\b(start date|from date)\b/i.test(context) && /\b(education|school|degree)\b/i.test(context)) return { kind: 'edu_start_date', label: 'education start date' };
+  if (/\b(end date|graduation|graduated|to date)\b/i.test(context) && /\b(education|school|degree)\b/i.test(context)) return { kind: 'edu_end_date', label: 'education end date' };
+  return null;
+}
+
+function valueForApplicationField(context, element, basics, workHistory, education, profile, counters) {
+  switch (context.kind) {
+    case 'full_name':
+      return basics.full_name || '';
+    case 'first_name':
+      return splitName(basics.full_name).first;
+    case 'last_name':
+      return splitName(basics.full_name).last;
+    case 'email':
+      return basics.email || '';
+    case 'phone':
+      return basics.phone || '';
+    case 'location':
+      return basics.location || '';
+    case 'city':
+      return locationParts(basics.location).city;
+    case 'state':
+      return locationParts(basics.location).state;
+    case 'postal_code':
+      return locationParts(basics.location).postalCode;
+    case 'linkedin_url':
+      return basics.linkedin_url || '';
+    case 'website_url':
+      return basics.website_url || '';
+    case 'summary':
+      return basics.summary || '';
+    case 'headline':
+      return basics.headline || '';
+    case 'years_experience':
+      return String(basics.years_experience || profile.experience_years || '');
+    case 'skills':
+      return Array.isArray(profile.skills) ? profile.skills.join(', ') : '';
+    case 'tools':
+      return Array.isArray(profile.tools) ? profile.tools.join(', ') : '';
+    case 'certifications':
+      return Array.isArray(profile.certifications) ? profile.certifications.join(', ') : '';
+    case 'clearance':
+      return Array.isArray(profile.clearance_terms) ? profile.clearance_terms.join(', ') : '';
+    case 'job_title':
+      return workHistory[consumeIndex(counters, 'job_title', element)]?.title || '';
+    case 'job_company':
+      return workHistory[consumeIndex(counters, 'job_company', element)]?.company || '';
+    case 'job_location':
+      return workHistory[consumeIndex(counters, 'job_location', element)]?.location || '';
+    case 'job_start_date':
+      return formatApplicationDate(workHistory[consumeIndex(counters, 'job_start_date', element)]?.start_date || '', element);
+    case 'job_end_date':
+      return formatApplicationDate(workHistory[consumeIndex(counters, 'job_end_date', element)]?.end_date || '', element);
+    case 'job_description':
+      return workHistory[consumeIndex(counters, 'job_description', element)]?.description || '';
+    case 'edu_school':
+      return education[consumeIndex(counters, 'edu_school', element)]?.school || '';
+    case 'edu_degree':
+      return education[consumeIndex(counters, 'edu_degree', element)]?.degree || '';
+    case 'edu_field':
+      return education[consumeIndex(counters, 'edu_field', element)]?.field_of_study || '';
+    case 'edu_start_date':
+      return formatApplicationDate(education[consumeIndex(counters, 'edu_start_date', element)]?.start_date || '', element);
+    case 'edu_end_date':
+      return formatApplicationDate(education[consumeIndex(counters, 'edu_end_date', element)]?.end_date || '', element);
+    default:
+      return '';
+  }
+}
+
+function fieldContextText(element) {
+  const bits = [
+    normalizeText(element.getAttribute('aria-label') || ''),
+    normalizeText(element.getAttribute('placeholder') || ''),
+    normalizeText(element.getAttribute('name') || ''),
+    normalizeText(element.getAttribute('id') || ''),
+    normalizeText(element.getAttribute('autocomplete') || ''),
+  ];
+  if (element.labels) {
+    bits.push(...Array.from(element.labels).map((label) => text(label)));
+  }
+  const closestLabel = element.closest('label');
+  if (closestLabel) {
+    bits.push(text(closestLabel));
+  }
+  const container = element.closest('fieldset, [role="group"], .field, .form-group, .application-question, .question, .input-wrapper, .jobs-easy-apply-form-section__grouping');
+  if (container) {
+    bits.push(firstText(container, ['legend', 'label', 'h2', 'h3', '.question-label', '.field-label', '.artdeco-text-input--label']));
+  }
+  return normalizeText(bits.filter(Boolean).join(' | '));
+}
+
+function consumeIndex(counters, kind, element) {
+  const explicitIndex = inferFieldIndex(element);
+  if (explicitIndex !== null) {
+    return explicitIndex;
+  }
+  const current = counters[kind] || 0;
+  counters[kind] = current + 1;
+  return current;
+}
+
+function inferFieldIndex(element) {
+  const textValue = normalizeText([
+    element.getAttribute('name') || '',
+    element.getAttribute('id') || '',
+    element.getAttribute('data-testid') || '',
+  ].join(' '));
+  const bracketMatch = textValue.match(/\[(\d+)\]/);
+  if (bracketMatch) {
+    return Number(bracketMatch[1]);
+  }
+  const digitMatch = textValue.match(/(?:experience|employment|work|education|school)[^\d]{0,8}(\d+)/i);
+  if (digitMatch) {
+    return Number(digitMatch[1]);
+  }
+  return null;
+}
+
+function applyFieldValue(element, value) {
+  if (!value) {
+    return false;
+  }
+  if (element instanceof HTMLSelectElement) {
+    const option = Array.from(element.options).find((item) => {
+      const haystack = normalizeText(`${item.textContent || ''} ${item.value || ''}`).toLowerCase();
+      return haystack && haystack.includes(normalizeText(value).toLowerCase());
+    });
+    if (option) {
+      element.value = option.value;
+    } else {
+      return false;
+    }
+  } else {
+    element.focus();
+    element.value = value;
+  }
+  element.dispatchEvent(new Event('input', { bubbles: true }));
+  element.dispatchEvent(new Event('change', { bubbles: true }));
+  element.dispatchEvent(new Event('blur', { bubbles: true }));
+  return true;
+}
+
+function hasMeaningfulFieldValue(element) {
+  if (!(element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement)) {
+    return false;
+  }
+  return normalizeText(element.value || '') !== '';
+}
+
+function isFillableField(element) {
+  if (!(element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement || element instanceof HTMLSelectElement)) {
+    return false;
+  }
+  if (!isVisible(element) || element.disabled || element.readOnly) {
+    return false;
+  }
+  if (element instanceof HTMLInputElement) {
+    const blocked = new Set(['hidden', 'file', 'checkbox', 'radio', 'submit', 'button', 'password']);
+    if (blocked.has((element.type || '').toLowerCase())) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function splitName(fullName) {
+  const parts = normalizeText(fullName).split(' ').filter(Boolean);
+  if (parts.length === 0) {
+    return { first: '', last: '' };
+  }
+  if (parts.length === 1) {
+    return { first: parts[0], last: '' };
+  }
+  return { first: parts[0], last: parts.slice(1).join(' ') };
+}
+
+function locationParts(value) {
+  const normalized = normalizeText(value);
+  const postalMatch = normalized.match(/\b\d{5}(?:-\d{4})?\b/);
+  const postalCode = postalMatch ? postalMatch[0] : '';
+  const parts = normalized.split(',').map((part) => normalizeText(part));
+  let city = parts[0] || '';
+  let state = '';
+  if (parts.length > 1) {
+    const statePart = parts[1].replace(postalCode, '').trim();
+    state = statePart.split(/\s+/)[0] || '';
+  }
+  return { city, state, postalCode };
+}
+
+function formatApplicationDate(value, element) {
+  const normalized = normalizeText(value);
+  if (!normalized) {
+    return '';
+  }
+  if (element instanceof HTMLInputElement && element.type === 'month') {
+    return normalized.slice(0, 7);
+  }
+  if (element instanceof HTMLInputElement && element.type === 'date') {
+    return normalized.slice(0, 10);
+  }
+  return normalized;
 }
 
 function uniqueNodes(nodes) {

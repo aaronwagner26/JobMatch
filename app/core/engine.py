@@ -56,6 +56,29 @@ class JobMatchEngine:
     def get_active_resume(self) -> ResumeProfile | None:
         return self.storage.get_active_resume()
 
+    def get_active_application_profile(self) -> dict[str, object] | None:
+        resume = self.storage.get_active_resume()
+        return dict(resume.application_profile or {}) if resume else None
+
+    def update_active_resume_profile(self, profile: dict[str, object]) -> ResumeProfile:
+        resume = self.storage.get_active_resume()
+        if resume is None:
+            raise ValueError("Upload a resume before editing the profile.")
+        normalized_profile = self._normalize_application_profile(profile)
+        updated_resume = replace(
+            resume,
+            application_profile=normalized_profile,
+            skills=list(normalized_profile.get("skills") or []),
+            tools=list(normalized_profile.get("tools") or []),
+            certifications=list(normalized_profile.get("certifications") or []),
+            clearance_terms=list(normalized_profile.get("clearance_terms") or []),
+            recent_titles=self._profile_recent_titles(normalized_profile),
+            experience_years=float(normalized_profile.get("experience_years") or 0.0),
+            summary_text=self._build_resume_summary_from_profile(resume, normalized_profile),
+            embedding=None,
+        )
+        return self.storage.update_active_resume(updated_resume)
+
     def list_sources(self) -> list[JobSourceConfig]:
         return self.storage.list_sources()
 
@@ -637,6 +660,132 @@ class JobMatchEngine:
             job_enabled=bool(settings.get("ollama_enhance_jobs", True)),
             max_job_enrichments=int(settings.get("ollama_max_job_enrichments", 20) or 0),
         )
+
+    @staticmethod
+    def _normalize_application_profile(profile: dict[str, object]) -> dict[str, object]:
+        basics = dict(profile.get("basics") or {})
+        work_history = [dict(item) for item in (profile.get("work_history") or []) if isinstance(item, dict)]
+        education = [dict(item) for item in (profile.get("education") or []) if isinstance(item, dict)]
+        normalized = {
+            "basics": {
+                "full_name": normalize_whitespace(str(basics.get("full_name") or "")),
+                "email": normalize_whitespace(str(basics.get("email") or "")),
+                "phone": normalize_whitespace(str(basics.get("phone") or "")),
+                "location": normalize_whitespace(str(basics.get("location") or "")),
+                "linkedin_url": normalize_whitespace(str(basics.get("linkedin_url") or "")),
+                "website_url": normalize_whitespace(str(basics.get("website_url") or "")),
+                "headline": normalize_whitespace(str(basics.get("headline") or "")),
+                "summary": normalize_whitespace(str(basics.get("summary") or "")),
+                "years_experience": float(basics.get("years_experience") or profile.get("experience_years") or 0.0),
+            },
+            "work_history": [
+                {
+                    "title": normalize_whitespace(str(item.get("title") or "")),
+                    "company": normalize_whitespace(str(item.get("company") or "")),
+                    "location": normalize_whitespace(str(item.get("location") or "")),
+                    "start_date": normalize_whitespace(str(item.get("start_date") or "")),
+                    "end_date": normalize_whitespace(str(item.get("end_date") or "")),
+                    "is_current": bool(item.get("is_current", False)),
+                    "description": clean_job_text(str(item.get("description") or "")),
+                }
+                for item in work_history
+                if any(normalize_whitespace(str(item.get(key) or "")) for key in ("title", "company", "description"))
+            ],
+            "education": [
+                {
+                    "school": normalize_whitespace(str(item.get("school") or "")),
+                    "degree": normalize_whitespace(str(item.get("degree") or "")),
+                    "field_of_study": normalize_whitespace(str(item.get("field_of_study") or "")),
+                    "start_date": normalize_whitespace(str(item.get("start_date") or "")),
+                    "end_date": normalize_whitespace(str(item.get("end_date") or "")),
+                    "description": clean_job_text(str(item.get("description") or "")),
+                }
+                for item in education
+                if any(normalize_whitespace(str(item.get(key) or "")) for key in ("school", "degree", "description"))
+            ],
+            "skills": JobMatchEngine._normalize_string_list(profile.get("skills")),
+            "tools": JobMatchEngine._normalize_string_list(profile.get("tools")),
+            "certifications": JobMatchEngine._normalize_string_list(profile.get("certifications")),
+            "clearance_terms": JobMatchEngine._normalize_string_list(profile.get("clearance_terms")),
+            "recent_titles": [],
+            "experience_years": float(profile.get("experience_years") or basics.get("years_experience") or 0.0),
+        }
+        normalized["recent_titles"] = JobMatchEngine._profile_recent_titles(normalized)
+        return normalized
+
+    @staticmethod
+    def _normalize_string_list(value: object) -> list[str]:
+        if isinstance(value, str):
+            parts = [part.strip() for part in value.replace(";", ",").split(",")]
+        elif isinstance(value, list):
+            parts = [str(item).strip() for item in value]
+        else:
+            parts = []
+        seen: dict[str, str] = {}
+        for part in parts:
+            normalized = normalize_whitespace(part)
+            if normalized:
+                seen.setdefault(normalized.casefold(), normalized)
+        return list(seen.values())
+
+    @staticmethod
+    def _profile_recent_titles(profile: dict[str, object]) -> list[str]:
+        titles: list[str] = []
+        basics = dict(profile.get("basics") or {})
+        headline = normalize_whitespace(str(basics.get("headline") or ""))
+        if headline:
+            titles.append(headline)
+        seen = {headline.casefold()} if headline else set()
+        for item in profile.get("work_history") or []:
+            if not isinstance(item, dict):
+                continue
+            title = normalize_whitespace(str(item.get("title") or ""))
+            if not title or title.casefold() in seen:
+                continue
+            titles.append(title)
+            seen.add(title.casefold())
+            if len(titles) >= 8:
+                break
+        return titles[:8]
+
+    @staticmethod
+    def _build_resume_summary_from_profile(resume: ResumeProfile, profile: dict[str, object]) -> str:
+        basics = dict(profile.get("basics") or {})
+        parts: list[str] = []
+        if basics.get("headline"):
+            parts.append(f"Headline: {basics['headline']}")
+        recent_titles = profile.get("recent_titles") or []
+        if recent_titles:
+            parts.append(f"Recent titles: {', '.join(recent_titles[:6])}")
+        if profile.get("skills"):
+            parts.append(f"Skills: {', '.join(profile['skills'][:30])}")
+        if profile.get("tools"):
+            parts.append(f"Tools and platforms: {', '.join(profile['tools'][:22])}")
+        if profile.get("certifications"):
+            parts.append(f"Certifications: {', '.join(profile['certifications'][:12])}")
+        if profile.get("clearance_terms"):
+            parts.append(f"Clearance: {', '.join(profile['clearance_terms'])}")
+        years = float(profile.get("experience_years") or basics.get("years_experience") or 0.0)
+        if years:
+            parts.append(f"Estimated experience: {years:.1f} years")
+        if basics.get("summary"):
+            parts.append(f"Profile: {basics['summary']}")
+        work_history = [item for item in (profile.get("work_history") or []) if isinstance(item, dict)]
+        if work_history:
+            highlights = []
+            for item in work_history[:4]:
+                description = normalize_whitespace(str(item.get("description") or ""))
+                clipped = description[:180].rstrip()
+                highlight = normalize_whitespace(
+                    " | ".join(filter(None, [str(item.get("title") or ""), str(item.get("company") or ""), clipped]))
+                )
+                if highlight:
+                    highlights.append(highlight)
+            if highlights:
+                parts.append(f"Experience highlights: {' || '.join(highlights)}")
+        if resume.sections.get("projects"):
+            parts.append(f"Projects: {resume.sections['projects']}")
+        return "\n".join(parts)
 
     @staticmethod
     def _emit_progress(on_progress: Callable[[dict], None] | None, **event: object) -> None:
