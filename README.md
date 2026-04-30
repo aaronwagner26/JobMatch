@@ -40,6 +40,7 @@ powershell -ExecutionPolicy Bypass -File .\run_jobmatch.ps1
 
 The launcher script runs from the repo folder automatically and will trigger setup on first launch if Python 3.12 does not have the required packages yet.
 Setup logs are written to `data/logs/setup-*.log` so you can inspect the exact pip step if first-run installation is slow or fails.
+The launcher and setup scripts also write `%USERPROFILE%\.ollama\server.json` with `disable_ollama_cloud: true`, so local Ollama use stays in local-only mode. If Ollama is already running when that file is first written, quit and reopen Ollama once.
 
 To access the app from another machine on the same network, run it on the host machine and open the printed LAN URL in the other machine's browser.
 
@@ -79,3 +80,13 @@ The recommended ingestion path for LinkedIn, Indeed, and other dynamic pages is 
 4. Open a jobs page and click `Capture visible jobs`
 
 Captured jobs are stored in JobMatch as `browser_capture` sources. These sources are manual-only and are skipped by the scheduler.
+
+## Ollama
+
+JobMatch uses the local Ollama HTTP API when Ollama refinement is enabled in `Settings`.
+
+- Default model: `gemma3:12b`
+- Default base URL: `http://127.0.0.1:11434`
+- Cloud features are disabled through `%USERPROFILE%\.ollama\server.json`
+
+If you already pulled `gemma3:12b`, just enable Ollama refinement in `Settings` and restart Ollama once if the local-only config was newly written.

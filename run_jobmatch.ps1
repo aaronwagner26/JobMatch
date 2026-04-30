@@ -6,6 +6,7 @@ param(
 $ErrorActionPreference = "Stop"
 $RepoRoot = $PSScriptRoot
 $SetupScript = Join-Path $RepoRoot "setup_jobmatch.ps1"
+$OllamaConfigPath = Join-Path $env:USERPROFILE ".ollama\server.json"
 
 function Test-Python312Command {
     param(
@@ -29,6 +30,36 @@ function Test-JobMatchDependencies {
     $probe = "import importlib.util, sys; modules=['bs4','httpx','nicegui','playwright','fitz','docx','dateutil','sklearn','sentence_transformers','sqlalchemy']; missing=[name for name in modules if importlib.util.find_spec(name) is None]; sys.exit(0 if not missing else 1)"
 
     return Test-Python312Command -Arguments @("-c", $probe)
+}
+
+function Set-OllamaLocalOnlyConfig {
+    $env:OLLAMA_NO_CLOUD = "1"
+
+    $config = @{}
+    if (Test-Path $OllamaConfigPath) {
+        $raw = Get-Content -Path $OllamaConfigPath -Raw -ErrorAction SilentlyContinue
+        if ($raw -and $raw.Trim()) {
+            try {
+                $parsed = $raw | ConvertFrom-Json
+                foreach ($property in $parsed.PSObject.Properties) {
+                    $config[$property.Name] = $property.Value
+                }
+            }
+            catch {
+                Write-Warning "Could not parse $OllamaConfigPath. Leaving it unchanged."
+                return $false
+            }
+        }
+    }
+
+    if ($config.ContainsKey("disable_ollama_cloud") -and [bool]$config["disable_ollama_cloud"]) {
+        return $false
+    }
+
+    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $OllamaConfigPath) | Out-Null
+    $config["disable_ollama_cloud"] = $true
+    $config | ConvertTo-Json -Depth 10 | Set-Content -Path $OllamaConfigPath -Encoding UTF8
+    return $true
 }
 
 function Get-PrimaryIPv4 {
@@ -155,6 +186,12 @@ function Assert-PortAvailable {
 Push-Location $RepoRoot
 
 try {
+    $ollamaConfigChanged = Set-OllamaLocalOnlyConfig
+    if ($ollamaConfigChanged) {
+        Write-Host "Updated $OllamaConfigPath to disable Ollama cloud features."
+        Write-Host "If Ollama is already running, quit and reopen Ollama for local-only mode to take effect."
+    }
+
     if (-not (Test-JobMatchDependencies)) {
         Write-Host "JobMatch dependencies not found. Running setup..."
         & $SetupScript

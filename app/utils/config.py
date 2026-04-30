@@ -58,7 +58,7 @@ DEFAULT_SETTINGS = {
     "max_source_jobs": 120,
     "ollama_enabled": False,
     "ollama_base_url": os.getenv("JOBMATCH_OLLAMA_BASE_URL", "http://127.0.0.1:11434"),
-    "ollama_model_name": os.getenv("JOBMATCH_OLLAMA_MODEL", "llama3.1:8b"),
+    "ollama_model_name": os.getenv("JOBMATCH_OLLAMA_MODEL", "gemma3:12b"),
     "ollama_enhance_resume": True,
     "ollama_enhance_jobs": True,
     "ollama_max_job_enrichments": 20,
