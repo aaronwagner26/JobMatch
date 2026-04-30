@@ -131,6 +131,10 @@ async function captureIndeedPage() {
       const anchor = node.tagName === 'A' ? node : firstNode(node, ['a[href*="/viewjob"]', 'a[href*="jk="]', 'a[href*="/rc/clk"]', 'a[href*="/pagead/clk"]']);
       return normalizeText(node?.getAttribute?.('data-jk') || anchor?.getAttribute?.('data-jk') || jobIdFromUrl(anchor?.href || ''));
     },
+    getExpectedTitle: (node) => {
+      const anchor = node.tagName === 'A' ? node : firstNode(node, ['a[href*="/viewjob"]', 'a[href*="jk="]', 'a[href*="/rc/clk"]', 'a[href*="/pagead/clk"]']);
+      return text(anchor);
+    },
     getClickTarget: (node) => firstNode(node, ['a[href*="/viewjob"]', '[data-jk]']) || node,
     captureDetail: (rawId, options = {}) => captureIndeedSelectedDetail(rawId, options),
     shouldSkipDetailWalk: (node) => looksLikeGroupedOpeningsCard(node),
@@ -145,6 +149,7 @@ async function captureIndeedPage() {
     const rawId = normalizeText(container?.getAttribute?.('data-jk') || anchor?.getAttribute?.('data-jk') || jobIdFromUrl(anchor?.href || ''));
     const url = canonicalIndeedJobUrl(anchor?.href || '', rawId);
     const selected = detailMap.get(rawId) || (detail && rawId && detail.raw_id === rawId ? detail : null);
+    const cardSalaryText = firstSalaryText(texts(container, ['.salary-snippet', '.estimated-salary', '[class*="salary"]', '[data-testid="attribute_snippet_testid"]']));
     return {
       raw_id: rawId || url,
       title: text(anchor),
@@ -152,7 +157,7 @@ async function captureIndeedPage() {
       location: firstText(container, ['.companyLocation', '[data-testid="text-location"]']),
       summary: selected?.summary || firstText(container, ['.job-snippet', '[data-testid="job-snippet"]']),
       description: selected?.description || '',
-      salary_text: selected?.salary_text || firstSalaryText(texts(container, ['.salary-snippet', '.estimated-salary', '[class*="salary"]', '[data-testid="attribute_snippet_testid"]'])),
+      salary_text: cardSalaryText || selected?.salary_text || '',
       employment_text: selected?.employment_text || '',
       url: selected?.url || url,
       posted_at: firstText(container, ['.date', 'time']),
@@ -377,6 +382,7 @@ async function captureVisibleResultDetails(cards, options) {
   let consecutiveSkips = 0;
   for (const card of cards.slice(0, DETAIL_CAPTURE_LIMIT)) {
     const rawId = normalizeText(options.getRawId(card) || '');
+    const expectedTitle = normalizeText(typeof options.getExpectedTitle === 'function' ? options.getExpectedTitle(card) : '');
     if (!rawId || detailMap.has(rawId)) {
         continue;
     }
@@ -388,7 +394,13 @@ async function captureVisibleResultDetails(cards, options) {
       continue;
     }
     const currentDetail = options.captureDetail('', { useHint: false });
-    if (currentDetail?.title && normalizeText(currentDetail.raw_id) === rawId) {
+    if (
+      currentDetail?.title
+      && (
+        normalizeText(currentDetail.raw_id) === rawId
+        || (expectedTitle && normalizeText(currentDetail.title) === expectedTitle)
+      )
+    ) {
       detailMap.set(rawId, currentDetail);
       consecutiveSkips = 0;
       continue;
@@ -404,7 +416,7 @@ async function captureVisibleResultDetails(cards, options) {
     safeScrollIntoView(card);
     const previousSignature = detailSignature(options.captureDetail('', { useHint: false }));
     clickElement(clickTarget);
-    const detail = await waitForDetailChange(rawId, previousSignature, options.captureDetail);
+    const detail = await waitForDetailChange(rawId, expectedTitle, previousSignature, options.captureDetail);
     if (detail?.title) {
       detailMap.set(rawId, detail);
       consecutiveSkips = 0;
@@ -418,7 +430,7 @@ async function captureVisibleResultDetails(cards, options) {
   return detailMap;
 }
 
-async function waitForDetailChange(rawId, previousSignature, captureDetail) {
+async function waitForDetailChange(rawId, expectedTitle, previousSignature, captureDetail) {
   const deadline = Date.now() + DETAIL_CAPTURE_TIMEOUT_MS;
   while (Date.now() < deadline) {
     await delay(DETAIL_CAPTURE_POLL_MS);
@@ -430,16 +442,9 @@ async function waitForDetailChange(rawId, previousSignature, captureDetail) {
       return detail;
     }
     const signature = detailSignature(detail);
-    if (signature && signature !== previousSignature) {
-      if (!normalizeText(detail.raw_id) && rawId) {
-        return { ...detail, raw_id: rawId };
-      }
+    if (signature && signature !== previousSignature && expectedTitle && normalizeText(detail.title) === expectedTitle) {
       return detail;
     }
-  }
-  const fallbackDetail = captureDetail(rawId, { useHint: true });
-  if (fallbackDetail?.title && detailSignature(fallbackDetail) !== previousSignature) {
-    return fallbackDetail;
   }
   return null;
 }
@@ -709,8 +714,10 @@ function detailSignature(detail) {
     return '';
   }
   return normalizeText([
-    detail.raw_id || '',
     detail.title || '',
+    detail.company || '',
+    detail.location || '',
+    detail.salary_text || '',
     excerpt(detail.description || detail.summary || '', 180),
   ].join('|'));
 }
