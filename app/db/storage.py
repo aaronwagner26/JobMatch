@@ -305,6 +305,7 @@ class Storage:
                 record.last_seen_at = now
                 record.active = True
                 if record.content_hash == job.content_hash:
+                    self._refresh_unchanged_job_record(record, job, now)
                     unchanged += 1
                     continue
 
@@ -382,6 +383,7 @@ class Storage:
                 record.last_seen_at = now
                 record.active = True
                 if record.content_hash == job.content_hash:
+                    self._refresh_unchanged_job_record(record, job, now)
                     unchanged += 1
                     continue
 
@@ -536,3 +538,15 @@ class Storage:
             last_seen_at=record.last_seen_at,
             last_updated_at=record.last_updated_at,
         )
+
+    @staticmethod
+    def _refresh_unchanged_job_record(record: JobRecord, job: NormalizedJob, now: datetime) -> None:
+        updated = False
+        if record.url != job.url:
+            record.url = job.url
+            updated = True
+        if dict(record.metadata_json or {}) != dict(job.metadata or {}):
+            record.metadata_json = job.metadata
+            updated = True
+        if updated:
+            record.last_updated_at = now

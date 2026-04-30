@@ -4,6 +4,7 @@ from app.core.engine import JobMatchEngine
 from app.core.job_fetcher import JobFetcher
 from app.core.normalizer import JobNormalizer
 from app.core.types import JobSourceConfig, NormalizedJob
+from app.db.models import JobRecord
 from app.db.storage import Storage
 
 
@@ -232,3 +233,44 @@ def test_browser_capture_import_keeps_indeed_jobs_distinct_for_ranking() -> None
         "https://www.indeed.com/viewjob?jk=job-c",
     }
     assert len(JobMatchEngine._deduplicate_jobs(jobs)) == 3
+
+
+def test_browser_capture_reimport_updates_indeed_urls_even_when_content_is_unchanged() -> None:
+    storage = Storage("sqlite+pysqlite:///:memory:")
+    engine = JobMatchEngine(storage=storage)
+    payload = {
+        "parser": "indeed_search",
+        "page": {
+            "url": "https://www.indeed.com/jobs?q=system+administrator&l=Remote",
+            "title": "System Administrator Jobs, Employment in Remote | Indeed",
+            "site": "Indeed",
+        },
+        "source": {
+            "site": "Indeed",
+        },
+        "jobs": [
+            {
+                "raw_id": "job-a",
+                "title": "System Administrator I",
+                "company": "Example Co",
+                "location": "Remote",
+                "summary": "Windows and Active Directory",
+                "url": "https://www.indeed.com/pagead/clk?mo=r&ad=-6NYlbfk",
+            },
+        ],
+    }
+
+    engine.import_browser_capture(payload)
+    with storage.session() as session:
+        record = session.query(JobRecord).one()
+        record.url = "https://www.indeed.com/pagead/clk"
+        metadata = dict(record.metadata_json or {})
+        metadata["canonical_url"] = "https://www.indeed.com/pagead/clk"
+        record.metadata_json = metadata
+
+    second = engine.import_browser_capture(payload)
+
+    repaired = storage.list_jobs()[0]
+    assert second["jobs_unchanged"] == 1
+    assert repaired.url == "https://www.indeed.com/viewjob?jk=job-a"
+    assert repaired.metadata["canonical_url"] == "https://www.indeed.com/viewjob?jk=job-a"
