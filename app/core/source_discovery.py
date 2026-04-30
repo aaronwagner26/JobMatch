@@ -141,6 +141,8 @@ class SourceDiscovery:
         host = urlsplit(normalized_url).netloc.casefold()
         if not host:
             return []
+        if self._host_is_excluded(normalized_url):
+            return []
 
         platform = None
         source_type = "custom_url"

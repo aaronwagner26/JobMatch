@@ -60,6 +60,9 @@ class JobMatchEngine:
 
     def save_source(self, payload: JobSourceConfig) -> JobSourceConfig:
         payload.url = sanitize_source_url(payload.url, payload.source_type)
+        unsupported_reason = self.job_fetcher.unsupported_source_reason(payload)
+        if unsupported_reason:
+            raise ValueError(unsupported_reason)
         return self.storage.upsert_source(payload)
 
     def discover_sources(self, query: str) -> list[DiscoveredSourceCandidate]:

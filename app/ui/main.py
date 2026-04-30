@@ -882,7 +882,11 @@ class JobMatchUI:
         if not payload.name or not payload.url:
             self._notify("Name and URL are required for a source.", type="warning")
             return
-        saved = self.engine.save_source(payload)
+        try:
+            saved = self.engine.save_source(payload)
+        except Exception as exc:
+            self._notify(str(exc), type="negative")
+            return
         self.state.selected_source_id = saved.id
         self.state.source_form = {
             "id": saved.id,
@@ -967,7 +971,11 @@ class JobMatchUI:
             return
         candidate = self.state.discovery_results[index]
         payload = self.engine.source_from_candidate(self._dict_to_candidate(candidate))
-        saved = self.engine.save_source(payload)
+        try:
+            saved = self.engine.save_source(payload)
+        except Exception as exc:
+            self._notify(str(exc), type="negative")
+            return
         self.state.selected_source_id = saved.id
         self.state.source_form = {
             "id": saved.id,

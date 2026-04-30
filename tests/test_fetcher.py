@@ -338,6 +338,31 @@ def test_scan_source_returns_cancelled_when_requested() -> None:
     assert request_attempted is False
 
 
+def test_scan_source_rejects_linkedin_company_jobs_pages() -> None:
+    source = JobSourceConfig(
+        id=10,
+        name="Netflix on LinkedIn",
+        source_type="custom_url",
+        url="https://www.linkedin.com/company/netflix/jobs",
+        request_delay_ms=0,
+    )
+    fetcher = JobFetcher(JobNormalizer())
+    request_attempted = False
+
+    async def fake_request_text(scan_source, url, *, throttle, conditional=True, cancel_requested=None):  # noqa: ANN001
+        nonlocal request_attempted
+        request_attempted = True
+        return FakeResponse("<html></html>")
+
+    fetcher._request_text = fake_request_text  # type: ignore[method-assign]
+
+    result = asyncio.run(fetcher.scan_source(source, max_jobs=20, known_jobs={}))
+
+    assert result.status == "error"
+    assert "LinkedIn company/job pages are not supported" in (result.error or "")
+    assert request_attempted is False
+
+
 def test_indeed_detail_enrichment_skips_browser_fallback_after_block() -> None:
     source = JobSourceConfig(
         id=7,

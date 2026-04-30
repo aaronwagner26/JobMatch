@@ -13,6 +13,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 from bs4 import BeautifulSoup
@@ -85,6 +86,10 @@ class JobFetcher:
     def determine_source_type(self, source: JobSourceConfig) -> str:
         return self._determine_source_type(source)
 
+    def unsupported_source_reason(self, source: JobSourceConfig | str) -> str | None:
+        url = source.url if isinstance(source, JobSourceConfig) else source
+        return self._unsupported_source_reason(url)
+
     def open_source_in_browser_profile(self, source: JobSourceConfig) -> str:
         browser_source = source if source.use_browser_profile else replace(source, use_browser_profile=True)
         options, browser_label = self._persistent_browser_launch_options()
@@ -117,6 +122,9 @@ class JobFetcher:
         source_type = self._determine_source_type(source)
         source.source_type = source_type
         source.url = sanitize_source_url(source.url, source_type)
+        unsupported_reason = self._unsupported_source_reason(source.url)
+        if unsupported_reason:
+            raise ValueError(unsupported_reason)
         html = await self._capture_source_page_html(source, parser=self._parser_name_for_source_type(source_type))
         jobs = self._normalize_payloads(source, self._manual_prepared_payloads(source, html, known_jobs), max_jobs=max_jobs)
         return ScanResult(source=source, status="manual_import", jobs=jobs, pages_scanned=1)
@@ -131,6 +139,9 @@ class JobFetcher:
         source_type = self._determine_source_type(source)
         source.source_type = source_type
         source.url = sanitize_source_url(source.url, source_type)
+        unsupported_reason = self._unsupported_source_reason(source.url)
+        if unsupported_reason:
+            raise ValueError(unsupported_reason)
         jobs = self._normalize_payloads(
             source,
             self._manual_prepared_payloads(source, html_text, known_jobs=None),
@@ -142,6 +153,9 @@ class JobFetcher:
         source_type = self._determine_source_type(source)
         source.source_type = source_type
         source.url = sanitize_source_url(source.url, source_type)
+        unsupported_reason = self._unsupported_source_reason(source.url)
+        if unsupported_reason:
+            raise ValueError(unsupported_reason)
         throttle = SourceThrottle(source.request_delay_ms)
         normalized_jobs: list[NormalizedJob] = []
         if source.use_browser_profile:
@@ -182,6 +196,9 @@ class JobFetcher:
         source_type = self._determine_source_type(source)
         source.source_type = source_type
         source.url = sanitize_source_url(source.url, source_type)
+        unsupported_reason = self._unsupported_source_reason(source.url)
+        if unsupported_reason:
+            return ScanResult(source=source, status="error", error=unsupported_reason)
         throttle = SourceThrottle(source.request_delay_ms)
         diagnostics = {"pages_scanned": 0, "detail_pages_fetched": 0, "stopped_early": False}
         try:
@@ -1418,6 +1435,17 @@ class JobFetcher:
             if executable.exists():
                 return {"executable_path": str(executable)}, label
         return {}, None
+
+    @staticmethod
+    def _unsupported_source_reason(url: str) -> str | None:
+        host = urlsplit(url).netloc.casefold()
+        if host.endswith("linkedin.com"):
+            return (
+                "LinkedIn company/job pages are not supported as direct scan sources because LinkedIn mixes "
+                "company openings with broader marketplace listings. Use the employer careers page or a "
+                "discovered ATS board instead."
+            )
+        return None
 
     @staticmethod
     def _should_use_browser_session(source: JobSourceConfig, parser: str) -> bool:
