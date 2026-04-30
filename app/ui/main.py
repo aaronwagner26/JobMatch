@@ -127,13 +127,14 @@ ui.add_css(
     .match-table th, .match-table td { white-space: normal; vertical-align: top; }
     .match-col-expander { width: 2rem; max-width: 2rem; }
     .match-col-score { width: 5.5rem; max-width: 5.5rem; }
+    .match-col-status { width: 9rem; max-width: 9rem; }
     .match-col-type { width: 7.5rem; max-width: 7.5rem; }
     .match-col-salary { width: 10rem; max-width: 10rem; text-align: right; }
     .match-col-open { width: 2.4rem; max-width: 2.4rem; text-align: right; }
-    .match-col-company { width: 12rem; max-width: 12rem; }
-    .match-col-location { width: 12rem; max-width: 12rem; }
+    .match-col-company { width: 12.5rem; max-width: 12.5rem; }
+    .match-col-location { width: 11rem; max-width: 11rem; }
     .match-col-title { width: auto; }
-    .match-col-expander, .match-col-score, .match-col-type, .match-col-salary, .match-col-open { padding-left: 0.4rem !important; padding-right: 0.4rem !important; }
+    .match-col-expander, .match-col-score, .match-col-status, .match-col-type, .match-col-salary, .match-col-open { padding-left: 0.4rem !important; padding-right: 0.4rem !important; }
     .match-table .q-btn.open-job-btn { min-width: 1.9rem; min-height: 1.9rem; padding: 0; }
     .match-table .q-btn.expand-btn { min-width: 1.7rem; min-height: 1.7rem; }
     .scan-actions { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: center; justify-content: space-between; width: 100%; }
@@ -155,13 +156,13 @@ ui.add_css(
     .application-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.9rem; padding: 0.75rem 0; border-top: 1px solid var(--app-border); }
     .application-row:first-of-type { border-top: 0; padding-top: 0.25rem; }
     .application-actions { display: flex; flex-wrap: wrap; gap: 0.55rem; align-items: center; }
-    .application-chip { display: inline-flex; align-items: center; border-radius: 999px; padding: 0.18rem 0.55rem; font-size: 0.72rem; font-weight: 700; letter-spacing: 0.03em; }
-    .application-chip-pending { background: rgba(217, 119, 6, 0.16); color: #b45309; }
-    .application-chip-applied { background: rgba(15, 118, 110, 0.16); color: #0f766e; }
-    .application-chip-not-applied { background: rgba(71, 85, 105, 0.14); color: var(--app-muted); }
-    .application-chip-not-interested { background: rgba(148, 163, 184, 0.18); color: #475569; }
+    .application-chip { display: inline-flex; align-items: center; border-radius: 999px; padding: 0.25rem 0.65rem; font-size: 0.72rem; font-weight: 800; letter-spacing: 0.05em; text-transform: uppercase; }
+    .application-chip-pending { background: rgba(217, 119, 6, 0.18); color: #b45309; border: 1px solid rgba(217, 119, 6, 0.25); }
+    .application-chip-applied { background: #0f766e; color: #f8fafc; border: 1px solid rgba(15, 118, 110, 0.9); box-shadow: inset 0 0 0 1px rgba(255,255,255,0.08); }
+    .application-chip-not-applied { background: rgba(71, 85, 105, 0.1); color: var(--app-muted); border: 1px solid var(--app-border); }
+    .application-chip-not-interested { background: rgba(148, 163, 184, 0.16); color: #475569; border: 1px solid rgba(148, 163, 184, 0.28); }
     body.body--dark .application-chip-pending { color: #fdba74; }
-    body.body--dark .application-chip-applied { color: #5eead4; }
+    body.body--dark .application-chip-applied { color: #ecfeff; }
     body.body--dark .application-chip-not-interested { color: #cbd5e1; }
     .application-subcopy { color: var(--app-muted); font-size: 0.85rem; }
     .job-primary { font-weight: 600; color: var(--app-text); }
@@ -2039,6 +2040,7 @@ class JobMatchUI:
                 {"name": "title", "label": "Role", "field": "title", "sortable": True, "style": "width: 38%", "headerStyle": "width: 38%"},
                 {"name": "company", "label": "Company", "field": "company", "sortable": True, "style": "width: 18%", "headerStyle": "width: 18%"},
                 {"name": "location", "label": "Location", "field": "location", "sortable": True, "style": "width: 18%", "headerStyle": "width: 18%"},
+                {"name": "application_label", "label": "Status", "field": "application_label", "sortable": True, "style": "width: 9rem", "headerStyle": "width: 9rem"},
                 {"name": "job_type", "label": "Type", "field": "job_type", "sortable": True, "style": "width: 7.5rem", "headerStyle": "width: 7.5rem"},
                 {"name": "salary_text", "label": "Salary", "field": "salary_text", "sortable": True, "style": "width: 10rem", "headerStyle": "width: 10rem"},
                 {"name": "open_action", "label": "", "field": "open_action", "style": "width: 2.4rem", "headerStyle": "width: 2.4rem"},
@@ -2061,16 +2063,19 @@ class JobMatchUI:
               </q-td>
               __SCORE_CELL__
               <q-td key="title" :props="props" class="match-col-title">
-                <div class="chip-row" style="margin-bottom: 0.35rem;">
-                  <span :class="props.row.application_class">{{ props.row.application_label }}</span>
-                </div>
                 <div class="job-primary">{{ props.row.title }}</div>
                 <div class="job-secondary">{{ props.row.matched_summary }}</div>
               </q-td>
-              <q-td key="company" :props="props" class="match-col-company">{{ props.row.company }}</q-td>
+              <q-td key="company" :props="props" class="match-col-company">
+                <div>{{ props.row.company }}</div>
+                <div class="job-secondary">{{ props.row.source_name }}</div>
+              </q-td>
               <q-td key="location" :props="props" class="match-col-location">
                 <div>{{ props.row.location }}</div>
                 <div v-if="props.row.remote_mode" class="job-secondary">{{ props.row.remote_mode }}</div>
+              </q-td>
+              <q-td key="application_label" :props="props" class="match-col-status">
+                <span :class="props.row.application_class">{{ props.row.application_label }}</span>
               </q-td>
               <q-td key="job_type" :props="props" class="match-col-type">{{ props.row.job_type }}</q-td>
               <q-td key="salary_text" :props="props" class="match-col-salary">
@@ -2085,7 +2090,9 @@ class JobMatchUI:
                   flat
                   round
                   icon="open_in_new"
-                  @click="fetch(props.row.mark_opened_url, {method: 'POST'}).catch(() => null).finally(() => { window.open(props.row.url, '_blank', 'noopener'); setTimeout(() => window.location.reload(), 150); })"
+                  :href="props.row.open_url"
+                  target="_blank"
+                  rel="noopener"
                 />
               </q-td>
             </q-tr>
@@ -2147,7 +2154,9 @@ class JobMatchUI:
                         no-caps
                         icon-right="open_in_new"
                         label="Open posting"
-                        @click="fetch(props.row.mark_opened_url, {method: 'POST'}).catch(() => null).finally(() => { window.open(props.row.url, '_blank', 'noopener'); setTimeout(() => window.location.reload(), 150); })"
+                        :href="props.row.open_url"
+                        target="_blank"
+                        rel="noopener"
                       />
                     </div>
                   </div>
@@ -2191,13 +2200,13 @@ class JobMatchUI:
             "clearance": clearance,
             "posted_at": match.job.posted_at.strftime("%Y-%m-%d") if match.job.posted_at else "Unknown",
             "url": match.job.url,
+            "open_url": f"/jobs/open/{match.job_id}",
             "source_name": match.job.source_name,
             "description": clipped_excerpt(clean_job_text(match.job.description), 1200),
             "application_status": match.job.application_status,
             "application_label": application["label"],
             "application_class": application["class"],
             "application_help": application["help"],
-            "mark_opened_url": f"/api/jobs/{match.job_id}/mark-opened",
             "application_state_url": f"/api/jobs/{match.job_id}/application-state",
         }
 
@@ -2222,13 +2231,13 @@ class JobMatchUI:
             "clearance": clearance,
             "posted_at": job.posted_at.strftime("%Y-%m-%d") if job.posted_at else "Unknown",
             "url": job.url,
+            "open_url": f"/jobs/open/{job.id}" if job.id is not None else job.url,
             "source_name": job.source_name,
             "description": clipped_excerpt(clean_job_text(job.description), 1200),
             "application_status": job.application_status,
             "application_label": application["label"],
             "application_class": application["class"],
             "application_help": application["help"],
-            "mark_opened_url": f"/api/jobs/{job.id}/mark-opened" if job.id is not None else "",
             "application_state_url": f"/api/jobs/{job.id}/application-state" if job.id is not None else "",
         }
 
@@ -2237,7 +2246,7 @@ class JobMatchUI:
         status = normalize_whitespace(getattr(job, "application_status", "not_applied") or "not_applied").replace("-", "_")
         if getattr(job, "application_confirmation_needed", False) or status == "pending":
             return {
-                "label": "Confirm application",
+                "label": "Needs confirmation",
                 "class": "application-chip application-chip-pending",
                 "help": "You opened this posting. Confirm whether you applied, want to do it later, or are no longer interested.",
             }
