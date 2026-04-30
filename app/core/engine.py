@@ -22,6 +22,7 @@ from app.core.types import (
     JobSourceConfig,
     MatchResult,
     MatchWeights,
+    NormalizedJob,
     ResumeProfile,
     ScanResult,
     ScanSummary,
@@ -394,6 +395,18 @@ class JobMatchEngine:
             self.storage.save_resume_embedding(resume.id, resume.embedding)
         self.storage.save_job_embeddings({job_id: embedding for job_id, embedding in job_embeddings.items() if embedding})
         return matcher.match(resume, jobs, filters)
+
+    def list_filtered_jobs(
+        self,
+        filters: FilterCriteria | None = None,
+        *,
+        dedupe: bool = False,
+    ) -> list[NormalizedJob]:
+        filters = filters or FilterCriteria()
+        jobs = self.storage.list_jobs(active_only=True, source_ids=filters.source_ids or None)
+        if dedupe:
+            jobs = self._deduplicate_jobs(jobs)
+        return [job for job in jobs if JobMatcher._job_matches_filters(job, filters)]
 
     def export_matches(self, export_format: str, matches: list[MatchResult]) -> Path:
         timestamp = datetime.now(UTC).strftime("%Y%m%d-%H%M%S")

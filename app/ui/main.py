@@ -13,7 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from nicegui import app, events, ui
 
 from app.core.engine import JobMatchEngine
-from app.core.types import DiscoveredSourceCandidate, FilterCriteria, JobSourceConfig, MatchResult, ScanSummary
+from app.core.types import DiscoveredSourceCandidate, FilterCriteria, JobSourceConfig, MatchResult, NormalizedJob, ScanSummary
 from app.utils.config import (
     APP_NAME,
     DEFAULT_SOURCE_MAX_PAGES,
@@ -112,17 +112,25 @@ ui.add_css(
     .toolbar-grid { display: grid; grid-template-columns: 1.3fr 0.9fr 0.9fr 1.1fr auto auto auto; gap: 0.75rem; width: 100%; align-items: end; }
     .toolbar-grid .q-field, .toolbar-grid .q-select, .toolbar-grid .q-input { width: 100%; }
     .results-shell .q-table__middle { max-height: calc(100vh - 300px); }
+    .results-status-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.75rem; }
+    .results-metrics { display: flex; flex-wrap: wrap; gap: 0.55rem; align-items: center; }
+    .metric-chip { display: inline-flex; align-items: baseline; gap: 0.45rem; padding: 0.28rem 0.6rem; border-radius: 999px; border: 1px solid var(--app-border); background: transparent; }
+    .metric-chip-label { color: var(--app-muted); font-size: 0.72rem; text-transform: uppercase; letter-spacing: 0.08em; font-weight: 600; }
+    .metric-chip-value { color: var(--app-text); font-size: 0.86rem; font-weight: 700; }
+    .results-mode-toggle .q-btn { min-height: 2rem; padding: 0 0.7rem; }
     .match-table .q-table__middle { overflow-x: hidden; }
     .match-table table { width: 100%; table-layout: fixed; }
     .match-table th, .match-table td { white-space: normal; }
-    .match-col-expander { width: 3.5rem; max-width: 3.5rem; }
+    .match-col-expander { width: 2.5rem; max-width: 2.5rem; }
     .match-col-score { width: 6rem; max-width: 6rem; }
-    .match-col-type { width: 8.5rem; max-width: 8.5rem; }
-    .match-col-salary { width: 10.5rem; max-width: 10.5rem; }
-    .match-col-open { width: 7rem; max-width: 7rem; text-align: right; }
-    .match-col-company, .match-col-location { width: 14rem; }
-    .match-table .q-btn.open-job-btn { min-height: 2rem; padding: 0 0.65rem; }
-    .match-table .q-btn.expand-btn { min-width: 2rem; min-height: 2rem; }
+    .match-col-type { width: 6.75rem; max-width: 6.75rem; }
+    .match-col-salary { width: 11rem; max-width: 11rem; }
+    .match-col-open { width: 3rem; max-width: 3rem; text-align: right; }
+    .match-col-company { width: 11rem; max-width: 11rem; }
+    .match-col-location { width: 10.5rem; max-width: 10.5rem; }
+    .match-col-expander, .match-col-score, .match-col-type, .match-col-salary, .match-col-open { padding-left: 0.4rem !important; padding-right: 0.4rem !important; }
+    .match-table .q-btn.open-job-btn { min-width: 1.9rem; min-height: 1.9rem; padding: 0; }
+    .match-table .q-btn.expand-btn { min-width: 1.7rem; min-height: 1.7rem; }
     .scan-actions { display: flex; flex-wrap: wrap; gap: 0.75rem; align-items: center; justify-content: space-between; width: 100%; }
     .scan-actions-left, .scan-actions-right { display: flex; flex-wrap: wrap; gap: 0.6rem; align-items: center; }
     .scan-grid { display: grid; grid-template-columns: minmax(460px, 1.15fr) minmax(320px, 0.85fr); gap: 1rem; width: 100%; }
@@ -136,7 +144,7 @@ ui.add_css(
     .recent-scan-table .q-table__middle { max-height: 260px; }
     .results-shell thead tr th { position: sticky; top: 0; z-index: 1; background: var(--app-surface); }
     .score-pill { display: inline-flex; min-width: 3.7rem; justify-content: center; padding: 0.2rem 0.45rem; border-radius: 999px; background: rgba(15, 118, 110, 0.12); color: var(--app-accent); font-size: 0.78rem; }
-    .salary-pill { display: inline-flex; padding: 0.2rem 0.45rem; border-radius: 999px; background: rgba(124, 58, 237, 0.12); color: #6d28d9; font-size: 0.78rem; }
+    .salary-pill { display: inline-flex; white-space: nowrap; padding: 0.2rem 0.45rem; border-radius: 999px; background: rgba(124, 58, 237, 0.12); color: #6d28d9; font-size: 0.76rem; }
     body.body--dark .salary-pill { color: #c4b5fd; }
     .job-primary { font-weight: 600; color: var(--app-text); }
     .job-secondary { color: var(--app-muted); font-size: 0.88rem; }
@@ -212,6 +220,7 @@ async def browser_capture_import(request: Request) -> dict[str, Any]:
 @dataclass(slots=True)
 class UIState:
     current_view: str = "dashboard"
+    results_mode: str = "matched"
     location_query: str = ""
     remote_mode: str = "any"
     job_type: str = "any"
@@ -284,7 +293,7 @@ class JobMatchUI:
                 with ui.row().classes("items-center gap-3"):
                     ui.label("Browser capture ready").classes("text-slate-300 text-sm")
 
-        with ui.left_drawer(value=True, bordered=False, elevated=False).classes("app-drawer w-72"):
+        with ui.left_drawer(value=True, bordered=False, elevated=False).classes("app-drawer w-64"):
             self.nav_shell = ui.column().classes("w-full gap-3 p-4")
             self.render_sidebar()
 
@@ -414,16 +423,16 @@ class JobMatchUI:
             for key, label, icon in items:
                 classes = "nav-button nav-button-active" if self.state.current_view == key else "nav-button"
                 ui.button(label, icon=icon, on_click=lambda _, target=key: self.set_view(target)).props("flat no-caps align=left").classes(classes)
-            ui.separator().classes("my-2")
-            sources = self.engine.list_sources()
-            ui.label(f"{len(sources)} source(s) configured").classes("text-sm muted-copy")
-            resume = self.engine.get_active_resume()
-            ui.label(resume.filename if resume else "No resume loaded").classes("text-sm")
 
     def set_view(self, view: str) -> None:
         self.state.current_view = view
         self.render_sidebar()
         self.render_current_view()
+
+    def set_results_mode(self, mode: str) -> None:
+        self.state.results_mode = mode if mode in {"matched", "unmatched", "all"} else "matched"
+        if self.state.current_view == "dashboard":
+            self.render_current_view()
 
     def render_current_view(self) -> None:
         if self._client_deleted or self.content is None:
@@ -449,8 +458,16 @@ class JobMatchUI:
 
     def render_dashboard(self) -> None:
         resume = self.engine.get_active_resume()
-        sources = self.engine.list_sources()
-        cached_jobs = len(self.engine.storage.list_jobs())
+        cached_jobs = self.engine.list_filtered_jobs(self.current_filters(), dedupe=False)
+        matched_ids = {match.job_id for match in self.state.matches}
+        unmatched_jobs = [job for job in cached_jobs if job.id not in matched_ids]
+        visible_count = (
+            len(self.state.matches)
+            if self.state.results_mode == "matched"
+            else len(unmatched_jobs)
+            if self.state.results_mode == "unmatched"
+            else len(cached_jobs)
+        )
         with ui.column().classes("w-full gap-4"):
             with ui.row().classes("w-full items-end justify-between"):
                 with ui.column().classes("gap-1"):
@@ -478,26 +495,37 @@ class JobMatchUI:
                     ).props("outlined dense use-chips")
                     ui.button("Apply", icon="filter_alt", on_click=lambda: asyncio.create_task(self.refresh_matches())).props("unelevated")
                     ui.button("Clear", icon="restart_alt", on_click=self.clear_filters).props("flat")
-                    ui.label(f"{len(self.state.matches)} result(s)").classes("self-center muted-copy text-right")
+                    ui.label(f"{visible_count} shown").classes("self-center muted-copy text-right")
 
-            with ui.element("section").classes("panel"):
-                with ui.element("div").classes("stat-strip"):
-                    self._stat_block("Resume", resume.filename if resume else "None loaded")
-                    self._stat_block("Sources", str(len(sources)))
-                    self._stat_block("Cached jobs", str(cached_jobs))
-                    self._stat_block("Matches", str(len(self.state.matches)))
+            with ui.row().classes("results-status-row"):
+                with ui.row().classes("results-metrics"):
+                    self._metric_chip("Jobs", str(len(cached_jobs)))
+                    self._metric_chip("Matched", str(len(self.state.matches)))
+                    self._metric_chip("Unmatched", str(len(unmatched_jobs)))
+                ui.toggle(
+                    {"matched": "Matched", "unmatched": "Unmatched", "all": "Cached"},
+                    value=self.state.results_mode,
+                    on_change=lambda e: self.set_results_mode(str(e.value or "matched")),
+                ).props("unelevated no-caps toggle-color=primary").classes("results-mode-toggle")
 
             with ui.element("section").classes("panel results-shell"):
-                if self.state.match_error and not self.state.matches:
+                if self.state.results_mode == "matched" and self.state.match_error and not self.state.matches:
                     self._empty_state(self.state.match_error)
-                elif not resume:
+                elif self.state.results_mode == "matched" and not resume:
                     self._empty_state("Upload a resume to start matching against the cached jobs.")
-                elif not sources:
-                    self._empty_state("Add at least one source so the scan engine has something to pull from.")
-                elif not self.state.matches:
+                elif not cached_jobs:
+                    self._empty_state("No cached jobs yet. Import jobs from the extension or run a scheduled scan first.")
+                elif self.state.results_mode == "matched" and not self.state.matches:
                     self._empty_state("No matches yet. Import jobs from the extension or run a scheduled scan, then rank the jobs.")
+                elif self.state.results_mode == "unmatched" and not unmatched_jobs:
+                    self._empty_state("Everything in the current cached set is already represented in the ranked results.")
                 else:
-                    self._render_results_table(self.state.matches)
+                    if self.state.results_mode == "matched":
+                        self._render_results_table(self.state.matches, ranked=True)
+                    elif self.state.results_mode == "unmatched":
+                        self._render_results_table(unmatched_jobs, ranked=False, secondary_label="Not in ranked results.")
+                    else:
+                        self._render_results_table(cached_jobs, ranked=False, secondary_label="Cached job.")
 
     def render_scans(self) -> None:
         sources = self.engine.list_sources()
@@ -1667,32 +1695,51 @@ class JobMatchUI:
             ),
         }
 
-    def _render_results_table(self, matches: list[MatchResult]) -> None:
-        rows = [self._match_row(match) for match in matches]
+    def _render_results_table(
+        self,
+        items: list[MatchResult] | list[NormalizedJob],
+        *,
+        ranked: bool,
+        secondary_label: str | None = None,
+    ) -> None:
+        rows = (
+            [self._match_row(match) for match in items]
+            if ranked
+            else [self._job_row(job, secondary_label or "Cached job.") for job in items]
+        )
         columns = [
-            {"name": "expander", "label": "", "field": "id", "style": "width: 3.5rem", "headerStyle": "width: 3.5rem"},
-            {"name": "score_value", "label": "Match", "field": "score_value", "sortable": True, "style": "width: 6rem", "headerStyle": "width: 6rem"},
-            {"name": "title", "label": "Role", "field": "title", "sortable": True},
-            {"name": "company", "label": "Company", "field": "company", "sortable": True, "style": "width: 14rem", "headerStyle": "width: 14rem"},
-            {"name": "location", "label": "Location", "field": "location", "sortable": True, "style": "width: 14rem", "headerStyle": "width: 14rem"},
-            {"name": "job_type", "label": "Type", "field": "job_type", "sortable": True, "style": "width: 8.5rem", "headerStyle": "width: 8.5rem"},
-            {"name": "salary_text", "label": "Salary", "field": "salary_text", "sortable": True, "style": "width: 10.5rem", "headerStyle": "width: 10.5rem"},
-            {"name": "open_action", "label": "", "field": "open_action", "style": "width: 7rem", "headerStyle": "width: 7rem"},
+            {"name": "expander", "label": "", "field": "id", "style": "width: 2.5rem", "headerStyle": "width: 2.5rem"},
         ]
-        table = ui.table(rows=rows, columns=columns, row_key="id", pagination={"rowsPerPage": 18, "sortBy": "score_value", "descending": True}).classes("w-full match-table")
+        if ranked:
+            columns.append(
+                {"name": "score_value", "label": "Match", "field": "score_value", "sortable": True, "style": "width: 6rem", "headerStyle": "width: 6rem"}
+            )
+        columns.extend(
+            [
+                {"name": "title", "label": "Role", "field": "title", "sortable": True},
+                {"name": "company", "label": "Company", "field": "company", "sortable": True, "style": "width: 11rem", "headerStyle": "width: 11rem"},
+                {"name": "location", "label": "Location", "field": "location", "sortable": True, "style": "width: 10.5rem", "headerStyle": "width: 10.5rem"},
+                {"name": "job_type", "label": "Type", "field": "job_type", "sortable": True, "style": "width: 6.75rem", "headerStyle": "width: 6.75rem"},
+                {"name": "salary_text", "label": "Salary", "field": "salary_text", "sortable": True, "style": "width: 11rem", "headerStyle": "width: 11rem"},
+                {"name": "open_action", "label": "", "field": "open_action", "style": "width: 3rem", "headerStyle": "width: 3rem"},
+            ]
+        )
+        pagination = {"rowsPerPage": 18, "sortBy": "score_value", "descending": True} if ranked else {"rowsPerPage": 18}
+        table = ui.table(rows=rows, columns=columns, row_key="id", pagination=pagination).classes("w-full match-table")
         table.props("flat square separator=horizontal")
-        table.add_slot(
-            "body",
-            r"""
+        score_cell = """
+              <q-td key="score_value" :props="props" class="match-col-score">
+                <span class="score-pill">{{ props.row.score_display }}</span>
+              </q-td>
+        """ if ranked else ""
+        body_slot = """
             <q-tr :props="props">
               <q-td key="expander" :props="props" class="match-col-expander" auto-width>
                 <q-btn flat dense round size="sm" class="expand-btn"
                   :icon="props.expand ? 'keyboard_arrow_down' : 'keyboard_arrow_right'"
                   @click="props.expand = !props.expand" />
               </q-td>
-              <q-td key="score_value" :props="props" class="match-col-score">
-                <span class="score-pill">{{ props.row.score_display }}</span>
-              </q-td>
+              __SCORE_CELL__
               <q-td key="title" :props="props">
                 <div class="job-primary">{{ props.row.title }}</div>
                 <div class="job-secondary">{{ props.row.matched_summary }}</div>
@@ -1700,7 +1747,7 @@ class JobMatchUI:
               <q-td key="company" :props="props" class="match-col-company">{{ props.row.company }}</q-td>
               <q-td key="location" :props="props" class="match-col-location">
                 <div>{{ props.row.location }}</div>
-                <div class="job-secondary">{{ props.row.remote_mode }}</div>
+                <div v-if="props.row.remote_mode" class="job-secondary">{{ props.row.remote_mode }}</div>
               </q-td>
               <q-td key="job_type" :props="props" class="match-col-type">{{ props.row.job_type }}</q-td>
               <q-td key="salary_text" :props="props" class="match-col-salary">
@@ -1712,10 +1759,9 @@ class JobMatchUI:
                   class="open-job-btn"
                   color="primary"
                   dense
-                  unelevated
-                  no-caps
-                  icon-right="open_in_new"
-                  label="Open"
+                  flat
+                  round
+                  icon="open_in_new"
                   :href="props.row.url"
                   target="_blank"
                 />
@@ -1725,7 +1771,7 @@ class JobMatchUI:
               <q-td colspan="100%">
                 <div class="detail-grid">
                   <div class="detail-block">
-                    <div class="detail-title">Why It Scored This Way</div>
+                    <div class="detail-title">{{ props.row.analysis_title }}</div>
                     <div class="detail-copy">{{ props.row.reasons_text }}</div>
                   </div>
                   <div class="detail-block">
@@ -1760,7 +1806,10 @@ class JobMatchUI:
                 </div>
               </q-td>
             </q-tr>
-            """,
+        """
+        table.add_slot(
+            "body",
+            body_slot.replace("__SCORE_CELL__", score_cell),
         )
 
     @staticmethod
@@ -1769,7 +1818,7 @@ class JobMatchUI:
         matched_skills = ", ".join(match.matched_skills) if match.matched_skills else "No direct matches extracted."
         missing_skills = ", ".join(match.missing_skills) if match.missing_skills else "No obvious gaps detected."
         reasons_text = "\n".join(match.reasons)
-        matched_summary = f"{len(match.matched_skills)} matched skill(s) - {match.embedding_score * 100:.0f}% semantic fit"
+        matched_summary = f"{len(match.matched_skills)} skill(s) | {match.embedding_score * 100:.0f}% semantic"
         type_display, salary_display = JobMatchUI._display_type_and_salary(match.job.job_type, match.job.salary_text, match.job.employment_text)
         return {
             "id": match.job_id,
@@ -1778,18 +1827,43 @@ class JobMatchUI:
             "title": match.job.title,
             "company": match.job.company,
             "location": match.job.location or "Unspecified",
-            "remote_mode": match.job.remote_mode,
+            "remote_mode": JobMatchUI._display_remote_mode(match.job.remote_mode),
             "job_type": type_display,
             "salary_text": salary_display,
             "matched_summary": matched_summary,
             "matched_skills": matched_skills,
             "missing_skills": missing_skills,
+            "analysis_title": "Why It Scored This Way",
             "reasons_text": reasons_text,
             "clearance": clearance,
             "posted_at": match.job.posted_at.strftime("%Y-%m-%d") if match.job.posted_at else "Unknown",
             "url": match.job.url,
             "source_name": match.job.source_name,
             "description": clipped_excerpt(match.job.description, 1200),
+        }
+
+    @staticmethod
+    def _job_row(job: NormalizedJob, secondary_label: str) -> dict[str, Any]:
+        clearance = ", ".join(job.clearance_terms) if job.clearance_terms else "None"
+        type_display, salary_display = JobMatchUI._display_type_and_salary(job.job_type, job.salary_text, job.employment_text)
+        return {
+            "id": job.id,
+            "title": job.title,
+            "company": job.company,
+            "location": job.location or "Unspecified",
+            "remote_mode": JobMatchUI._display_remote_mode(job.remote_mode),
+            "job_type": type_display,
+            "salary_text": salary_display,
+            "matched_summary": secondary_label,
+            "matched_skills": "Rank jobs with a resume to see extracted skill matches.",
+            "missing_skills": "Rank jobs with a resume to see potential gaps.",
+            "analysis_title": "Rank Status",
+            "reasons_text": secondary_label,
+            "clearance": clearance,
+            "posted_at": job.posted_at.strftime("%Y-%m-%d") if job.posted_at else "Unknown",
+            "url": job.url,
+            "source_name": job.source_name,
+            "description": clipped_excerpt(job.description, 1200),
         }
 
     @staticmethod
@@ -1805,10 +1879,23 @@ class JobMatchUI:
         return type_display, parsed_salary or ""
 
     @staticmethod
+    def _display_remote_mode(remote_mode: str | None) -> str:
+        normalized = normalize_whitespace(str(remote_mode or ""))
+        if normalized in {"", "any", "unknown", "onsite"}:
+            return ""
+        return normalized
+
+    @staticmethod
     def _stat_block(label: str, value: str) -> None:
         with ui.element("div").classes("stat-block"):
             ui.label(label).classes("section-label")
             ui.label(value).classes("stat-value")
+
+    @staticmethod
+    def _metric_chip(label: str, value: str) -> None:
+        with ui.element("div").classes("metric-chip"):
+            ui.label(label).classes("metric-chip-label")
+            ui.label(value).classes("metric-chip-value")
 
     @staticmethod
     def _empty_state(message: str) -> None:

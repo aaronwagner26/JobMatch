@@ -279,3 +279,110 @@ def test_browser_capture_reimport_updates_indeed_urls_even_when_content_is_uncha
     assert second["jobs_unchanged"] == 1
     assert repaired.url == "https://www.indeed.com/viewjob?jk=job-a"
     assert repaired.metadata["canonical_url"] == "https://www.indeed.com/viewjob?jk=job-a"
+
+
+def test_list_filtered_jobs_can_return_cached_or_deduped_views() -> None:
+    storage = Storage("sqlite+pysqlite:///:memory:")
+    engine = JobMatchEngine(storage=storage)
+    source = engine.save_source(
+        JobSourceConfig(
+            id=None,
+            name="Browser Capture",
+            source_type="browser_capture",
+            url="https://example.com/jobs",
+            enabled=True,
+        )
+    )
+    assert source.id is not None
+
+    duplicate_a = NormalizedJob(
+        id=None,
+        source_id=source.id,
+        source_name=source.name,
+        source_type=source.source_type,
+        external_id="job-1a",
+        title="Systems Engineer",
+        company="Example Co",
+        location="Remote",
+        remote_mode="remote",
+        job_type="full-time",
+        clearance_terms=[],
+        salary_min=None,
+        salary_max=None,
+        salary_currency=None,
+        salary_interval=None,
+        salary_text=None,
+        posted_at=None,
+        url="https://example.com/jobs/1",
+        description="Linux and AWS",
+        summary_text="Linux and AWS",
+        skills=["Linux", "AWS"],
+        required_skills=["Linux"],
+        preferred_skills=["AWS"],
+        experience_years=4.0,
+        employment_text="Full-time",
+        metadata={"canonical_url": "https://example.com/jobs/1"},
+        content_hash="hash-1a",
+    )
+    duplicate_b = NormalizedJob(
+        id=None,
+        source_id=source.id,
+        source_name=source.name,
+        source_type=source.source_type,
+        external_id="job-1b",
+        title="Systems Engineer",
+        company="Example Co",
+        location="Remote",
+        remote_mode="remote",
+        job_type="full-time",
+        clearance_terms=[],
+        salary_min=None,
+        salary_max=None,
+        salary_currency=None,
+        salary_interval=None,
+        salary_text=None,
+        posted_at=None,
+        url="https://example.com/jobs/1?ref=duplicate",
+        description="Linux and AWS with more detail",
+        summary_text="Linux and AWS with more detail",
+        skills=["Linux", "AWS"],
+        required_skills=["Linux"],
+        preferred_skills=["AWS"],
+        experience_years=4.0,
+        employment_text="Full-time",
+        metadata={"canonical_url": "https://example.com/jobs/1"},
+        content_hash="hash-1b",
+    )
+    distinct = NormalizedJob(
+        id=None,
+        source_id=source.id,
+        source_name=source.name,
+        source_type=source.source_type,
+        external_id="job-2",
+        title="Platform Administrator",
+        company="Example Co",
+        location="Denver, CO",
+        remote_mode="hybrid",
+        job_type="contract",
+        clearance_terms=[],
+        salary_min=None,
+        salary_max=None,
+        salary_currency=None,
+        salary_interval=None,
+        salary_text=None,
+        posted_at=None,
+        url="https://example.com/jobs/2",
+        description="Windows and Entra ID",
+        summary_text="Windows and Entra ID",
+        skills=["Windows"],
+        required_skills=["Windows"],
+        preferred_skills=[],
+        experience_years=3.0,
+        employment_text="Contract",
+        metadata={"canonical_url": "https://example.com/jobs/2"},
+        content_hash="hash-2",
+    )
+    storage.upsert_jobs(source, [duplicate_a, duplicate_b, distinct])
+
+    assert len(engine.list_filtered_jobs(dedupe=False)) == 3
+    assert len(engine.list_filtered_jobs(dedupe=True)) == 2
