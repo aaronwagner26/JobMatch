@@ -214,6 +214,33 @@ SALARY_SINGLE_PATTERNS = [
         re.IGNORECASE,
     ),
 ]
+SALARY_RANGE_PATTERNS.extend(
+    [
+        re.compile(
+            r"(?P<prefix>\bbetween\b|\bfrom\b)?\s*(?P<currency1>\$|usd)?\s*"
+            r"(?P<min>\d{1,3}(?:,\d{3})*(?:\.\d+)?(?:\s*[km])?)\s*"
+            r"(?:–|—)\s*"
+            r"(?P<currency2>\$|usd)?\s*(?P<max>\d{1,3}(?:,\d{3})*(?:\.\d+)?(?:\s*[km])?)"
+            r"(?P<suffix>[^.;,\n]{0,48})",
+            re.IGNORECASE,
+        ),
+    ]
+)
+SALARY_SINGLE_PATTERNS.extend(
+    [
+        re.compile(
+            r"\b(?:starting at|starts at|from|up to|minimum of|maximum of)\b[^$0-9]{0,12}"
+            r"(?P<currency>\$|usd)?\s*(?P<amount>\d{1,3}(?:,\d{3})*(?:\.\d+)?(?:\s*[km])?)"
+            r"(?P<suffix>[^.;,\n]{0,40})",
+            re.IGNORECASE,
+        ),
+        re.compile(
+            r"(?P<currency>\$|usd)?\s*(?P<amount>\d{1,3}(?:,\d{3})*(?:\.\d+)?(?:\s*[km])?)"
+            r"(?P<suffix>\s*(?:per|a|an|\/)\s*(?:hour|day|week|month|year|hr|wk|mo|yr)\b[^.;,\n]{0,24})",
+            re.IGNORECASE,
+        ),
+    ]
+)
 SALARY_INTERVAL_PATTERNS = {
     "hour": [r"\bper hour\b", r"\ban hour\b", r"\bhourly\b", r"\/hr\b", r"\bhr\b"],
     "year": [r"\bper year\b", r"\byearly\b", r"\bannual(?:ly)?\b", r"\/yr\b", r"\ba year\b"],
@@ -238,6 +265,17 @@ def _compiled_cert_patterns() -> dict[str, list[re.Pattern[str]]]:
     for canonical, aliases in CERTIFICATION_CATALOG.items():
         compiled[canonical] = [re.compile(rf"(?<![a-z0-9]){re.escape(alias)}(?![a-z0-9])", re.IGNORECASE) for alias in aliases]
     return compiled
+
+
+@lru_cache(maxsize=1)
+def _skill_alias_lookup() -> dict[str, str]:
+    lookup: dict[str, str] = {}
+    for canonical, meta in SKILL_CATALOG.items():
+        for phrase in [canonical, *meta["aliases"]]:
+            normalized = _normalize_skill_phrase(str(phrase))
+            if normalized:
+                lookup[normalized] = canonical
+    return lookup
 
 
 def extract_skills(text: str | None) -> list[str]:
@@ -346,7 +384,8 @@ def extract_salary_info(text: str | None) -> dict[str, object]:
         has_compensation_context = bool(
             re.search(r"\b(salary|compensation|pay|rate|hourly|annual|base)\b", window, flags=re.IGNORECASE)
         )
-        if not has_currency and not has_compensation_context:
+        has_interval = bool(_detect_salary_interval(match.group("suffix") or window))
+        if not has_currency and not has_compensation_context and not has_interval:
             continue
         minimum = _parse_salary_amount(match.group("min"))
         maximum = _parse_salary_amount(match.group("max"))
@@ -407,6 +446,45 @@ def format_salary_display(
             "year": "/yr",
         }.get(interval, "")
     return display
+
+
+def canonicalize_skill_name(value: str | None) -> str:
+    normalized = _normalize_skill_phrase(value)
+    if not normalized:
+        return ""
+    return _skill_alias_lookup().get(normalized, normalize_whitespace(value))
+
+
+def skills_equivalent(left: str | None, right: str | None) -> bool:
+    left_canonical = canonicalize_skill_name(left)
+    right_canonical = canonicalize_skill_name(right)
+    if left_canonical and right_canonical and left_canonical.casefold() == right_canonical.casefold():
+        return True
+
+    left_aliases = _skill_equivalent_phrases(left)
+    right_aliases = _skill_equivalent_phrases(right)
+    if left_aliases & right_aliases:
+        return True
+
+    left_tokens = _meaningful_skill_tokens(left_aliases)
+    right_tokens = _meaningful_skill_tokens(right_aliases)
+    if not left_tokens or not right_tokens:
+        return False
+    if left_tokens <= right_tokens or right_tokens <= left_tokens:
+        return True
+    overlap = left_tokens & right_tokens
+    return len(overlap) >= 2 and len(overlap) >= min(len(left_tokens), len(right_tokens))
+
+
+def match_skills(resume_skills: list[str], job_skills: list[str]) -> tuple[list[str], list[str]]:
+    matched: list[str] = []
+    missing: list[str] = []
+    for job_skill in unique_sorted(job_skills):
+        if any(skills_equivalent(resume_skill, job_skill) for resume_skill in resume_skills):
+            matched.append(job_skill)
+        else:
+            missing.append(job_skill)
+    return matched, missing
 
 
 def _clearance_sentences(text: str) -> list[str]:
@@ -487,3 +565,35 @@ def _detect_salary_interval(text: str | None) -> str | None:
         if any(re.search(pattern, haystack, flags=re.IGNORECASE) for pattern in patterns):
             return interval
     return "year"
+
+
+def _normalize_skill_phrase(value: str | None) -> str:
+    text = normalize_whitespace(value).casefold()
+    if not text:
+        return ""
+    text = text.replace("c plus plus", "c++").replace("c sharp", "c#")
+    text = re.sub(r"[^a-z0-9+#]+", " ", text)
+    return normalize_whitespace(text)
+
+
+def _skill_equivalent_phrases(value: str | None) -> set[str]:
+    canonical = canonicalize_skill_name(value)
+    phrases: set[str] = set()
+    if canonical and canonical in SKILL_CATALOG:
+        for phrase in [canonical, *SKILL_CATALOG[canonical]["aliases"]]:
+            normalized = _normalize_skill_phrase(str(phrase))
+            if normalized:
+                phrases.add(normalized)
+    normalized_value = _normalize_skill_phrase(value)
+    if normalized_value:
+        phrases.add(normalized_value)
+    return phrases
+
+
+def _meaningful_skill_tokens(phrases: set[str]) -> set[str]:
+    tokens: set[str] = set()
+    for phrase in phrases:
+        for token in phrase.split():
+            if len(token) >= 3 or token in {"c#", "c++", "ci", "ai", "ml", "ui", "ux"}:
+                tokens.add(token)
+    return tokens

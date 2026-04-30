@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from app.core.scoring import EmbeddingService, HybridScorer
 from app.core.types import FilterCriteria, MatchResult, MatchWeights, NormalizedJob, ResumeProfile
+from app.utils.skills import match_skills
+from app.utils.text import unique_sorted
 
 
 class JobMatcher:
@@ -35,7 +37,7 @@ class JobMatcher:
 
         scorer = HybridScorer(self.weights)
         results: list[MatchResult] = []
-        resume_skill_set = set(resume.skills)
+        resume_clearance_set = {term.casefold() for term in resume.clearance_terms}
         for job in filtered_jobs:
             if job.embedding is None or job.id is None:
                 continue
@@ -49,11 +51,10 @@ class JobMatcher:
                 resume_experience_years=resume.experience_years,
                 job_experience_years=job.experience_years,
             )
-            target_skills = job.required_skills or job.skills
-            matched_skills = sorted([skill for skill in target_skills if skill in resume_skill_set], key=str.casefold)
-            missing_skills = sorted([skill for skill in target_skills if skill not in resume_skill_set], key=str.casefold)
+            target_skills = self._target_skills(job)
+            matched_skills, missing_skills = match_skills(resume.skills, target_skills)
             matched_clearance = sorted(
-                [term for term in job.clearance_terms if term in set(resume.clearance_terms)],
+                [term for term in job.clearance_terms if term.casefold() in resume_clearance_set],
                 key=str.casefold,
             )
             reasons = self._build_reasons(
@@ -79,6 +80,12 @@ class JobMatcher:
                 )
             )
         return sorted(results, key=lambda result: result.score, reverse=True)
+
+    @staticmethod
+    def _target_skills(job: NormalizedJob) -> list[str]:
+        if job.required_skills or job.preferred_skills:
+            return unique_sorted([*job.required_skills, *job.preferred_skills])
+        return list(job.skills)
 
     @staticmethod
     def _job_matches_filters(job: NormalizedJob, filters: FilterCriteria) -> bool:

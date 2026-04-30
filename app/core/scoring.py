@@ -13,6 +13,7 @@ from huggingface_hub.utils import disable_progress_bars
 from sentence_transformers import SentenceTransformer
 
 from app.core.types import MatchWeights
+from app.utils.skills import skills_equivalent
 from app.utils.text import cosine_similarity
 
 logger = logging.getLogger(__name__)
@@ -98,19 +99,24 @@ class HybridScorer:
         preferred_skills: list[str],
         all_skills: list[str],
     ) -> float:
-        resume_set = {skill.casefold() for skill in resume_skills}
         weighted_skills: list[tuple[str, float]] = []
         weighted_skills.extend((skill, 1.0) for skill in required_skills)
         weighted_skills.extend((skill, 0.55) for skill in preferred_skills if skill not in required_skills)
         if not weighted_skills:
             weighted_skills.extend((skill, 0.75) for skill in all_skills)
         if not weighted_skills:
-            return 0.5 if resume_set else 0.0
-        matched = sum(weight for skill, weight in weighted_skills if skill.casefold() in resume_set)
+            return 0.5 if resume_skills else 0.0
+        matched = sum(
+            weight for skill, weight in weighted_skills if any(skills_equivalent(resume_skill, skill) for resume_skill in resume_skills)
+        )
         total = sum(weight for _, weight in weighted_skills)
         coverage = matched / total if total else 0.0
         required_total = sum(weight for _, weight in weighted_skills if weight >= 1.0)
-        required_matched = sum(weight for skill, weight in weighted_skills if weight >= 1.0 and skill.casefold() in resume_set)
+        required_matched = sum(
+            weight
+            for skill, weight in weighted_skills
+            if weight >= 1.0 and any(skills_equivalent(resume_skill, skill) for resume_skill in resume_skills)
+        )
         if required_total:
             required_coverage = required_matched / required_total
             coverage = (coverage * 0.75) + (required_coverage * 0.25)

@@ -50,3 +50,20 @@ def test_embedding_service_reuses_loaded_model(monkeypatch) -> None:
     assert first.encode(["resume"]) == [[1.0]]
     assert second.encode(["job"]) == [[1.0]]
     assert loaded_models == ["test-model"]
+
+
+def test_hybrid_scorer_matches_equivalent_skill_names() -> None:
+    scorer = HybridScorer(MatchWeights(embedding=0.0, skill=1.0, experience=0.0))
+    final_score, _embedding_score, skill_score, _experience_score = scorer.score(
+        resume_embedding=[1.0, 0.0],
+        job_embedding=[0.0, 1.0],
+        resume_skills=["Office 365", "Entra ID"],
+        job_required_skills=["Microsoft 365", "Azure AD"],
+        job_preferred_skills=[],
+        job_all_skills=["Microsoft 365", "Azure AD"],
+        resume_experience_years=0.0,
+        job_experience_years=None,
+    )
+
+    assert skill_score == 1.0
+    assert final_score == 1.0

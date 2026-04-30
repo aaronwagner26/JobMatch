@@ -20,7 +20,7 @@ from bs4 import BeautifulSoup
 
 from app.core.normalizer import JobNormalizer
 from app.core.types import JobSourceConfig, NormalizedJob, ScanResult
-from app.utils.skills import format_salary_display
+from app.utils.skills import extract_salary_info, format_salary_display
 from app.utils.config import (
     BROWSER_PROFILES_DIR,
     DEFAULT_BROWSER_CHALLENGE_WAIT_SECONDS,
@@ -850,6 +850,23 @@ class JobFetcher:
             ".jobsearch-JobComponent-description, .jobsearch-jobDescriptionText, .jobDescriptionText, article, main, [role='main'], .posting, .job-description"
         )
         description = normalize_whitespace(primary.get_text(" ")) if primary else ""
+        salary_text = self._best_salary_text(
+            soup,
+            [
+                ".salaryText",
+                "[data-testid='salaryInfoAndJobType']",
+                "[data-testid='attribute_snippet_testid']",
+                "[class*='salary']",
+            ],
+        )
+        employment_text = self._joined_text(
+            soup,
+            [
+                "[data-testid='salaryInfoAndJobType']",
+                "[data-testid='attribute_snippet_testid']",
+            ],
+            exclude={salary_text} if salary_text else None,
+        )
         title = self._first_text(
             soup,
             [
@@ -886,15 +903,8 @@ class JobFetcher:
                 ],
             ),
             "description": description,
-            "salary_text": self._first_text(
-                soup,
-                [
-                    ".salaryText",
-                    "[data-testid='salaryInfoAndJobType']",
-                    "[data-testid='attribute_snippet_testid']",
-                    "[class*='salary']",
-                ],
-            ),
+            "salary_text": salary_text,
+            "employment_text": employment_text,
             "url": url,
             "posted_at": self._first_text(soup, [".date", "[data-testid='myJobsStateDate']", "time"]),
         }
@@ -959,7 +969,15 @@ class JobFetcher:
                         "company": self._first_text(parent, [".companyName", "[data-testid='company-name']", "span.companyName"]),
                         "location": self._first_text(parent, [".companyLocation", "[data-testid='text-location']"]),
                         "summary": self._first_text(parent, [".job-snippet", "[data-testid='job-snippet']"]),
-                        "salary_text": self._first_text(parent, [".salary-snippet", ".estimated-salary", "[class*='salary']"]),
+                        "salary_text": self._best_salary_text(
+                            parent,
+                            [
+                                ".salary-snippet",
+                                ".estimated-salary",
+                                "[class*='salary']",
+                                "[data-testid='attribute_snippet_testid']",
+                            ],
+                        ),
                         "url": absolute_url(base_url, anchor.get("href")),
                         "posted_at": self._first_text(parent, [".date", "[data-testid='myJobsStateDate']"]),
                     }
@@ -988,7 +1006,7 @@ class JobFetcher:
                     "company": self._first_text(container, [".company", ".job-company", "[data-testid='company']"]),
                     "location": self._first_text(container, [".location", ".job-location", "[data-testid='location']"]),
                     "summary": self._first_text(container, [".description", ".job-description", "p"]),
-                    "salary_text": self._first_text(container, [".salary", ".salary-range", ".compensation"]),
+                    "salary_text": self._best_salary_text(container, [".salary", ".salary-range", ".compensation", "[class*='salary']"]),
                     "url": absolute_url(base_url, href),
                     "employment_text": self._first_text(container, [".employment-type", ".job-type"]),
                 }
@@ -1016,7 +1034,7 @@ class JobFetcher:
                     "company": self._first_text(container, [".company", ".posting-company", "[itemprop='hiringOrganization']"]),
                     "location": self._first_text(container, [".location", "[itemprop='jobLocation']"]),
                     "summary": self._first_text(container, [".description", ".summary", "p"]),
-                    "salary_text": self._first_text(container, [".salary", ".salary-range", ".compensation"]),
+                    "salary_text": self._best_salary_text(container, [".salary", ".salary-range", ".compensation", "[class*='salary']"]),
                     "url": absolute_url(base_url, href),
                 }
             )
@@ -1582,6 +1600,47 @@ class JobFetcher:
             if node and node.get_text():
                 return normalize_whitespace(node.get_text(" "))
         return ""
+
+    @staticmethod
+    def _collect_texts(container, selectors: list[str]) -> list[str]:
+        if container is None:
+            return []
+        values: list[str] = []
+        seen: set[str] = set()
+        for selector in selectors:
+            nodes = container.select(selector) if hasattr(container, "select") else []
+            for node in nodes:
+                text = normalize_whitespace(node.get_text(" "))
+                if not text:
+                    continue
+                folded = text.casefold()
+                if folded in seen:
+                    continue
+                seen.add(folded)
+                values.append(text)
+        return values
+
+    @staticmethod
+    def _best_salary_text(container, selectors: list[str]) -> str:
+        texts = JobFetcher._collect_texts(container, selectors)
+        if not texts:
+            return ""
+        for text in texts:
+            if extract_salary_info(text).get("display"):
+                return text
+        for text in texts:
+            if re.search(r"[$€£]|\b(?:salary|compensation|pay|hourly|annual|year|hour|hr|yr)\b", text, flags=re.IGNORECASE):
+                return text
+        return texts[0]
+
+    @staticmethod
+    def _joined_text(container, selectors: list[str], exclude: set[str] | None = None) -> str:
+        values = JobFetcher._collect_texts(container, selectors)
+        if exclude:
+            filtered = [value for value in values if value not in exclude]
+        else:
+            filtered = values
+        return normalize_whitespace(" | ".join(filtered))
 
     @staticmethod
     def _flatten_json_ld_location(location: Any) -> str:

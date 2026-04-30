@@ -64,6 +64,9 @@ class JobNormalizer:
                 )
             )
         )
+        raw_salary_text = normalize_whitespace(str(payload.get("salary_text") or ""))
+        if raw_salary_text and not salary_info.get("display"):
+            salary_info["display"] = raw_salary_text
         experience_years = self._extract_experience_years(required_text or description)
         llm_summary = ""
         if llm_enricher is not None:

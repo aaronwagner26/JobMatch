@@ -95,3 +95,23 @@ def test_job_normalizer_merges_optional_llm_enrichment() -> None:
     assert job.salary_text == "$120,000 - $140,000/yr"
     assert job.experience_years == 6.0
     assert "LLM summary:" in job.summary_text
+
+
+def test_job_normalizer_preserves_explicit_salary_field_when_description_is_sparse() -> None:
+    source = JobSourceConfig(id=1, name="Example Board", source_type="custom_url", url="https://example.com/jobs")
+    job = JobNormalizer().normalize(
+        source,
+        {
+            "raw_id": "job-999",
+            "title": "Systems Administrator",
+            "company": "Example Co",
+            "location": "Remote",
+            "summary": "Windows, VMware, and Intune support role",
+            "salary_text": "From $120,000 a year",
+            "url": "https://example.com/jobs/job-999",
+        },
+    )
+
+    assert "Windows Server" in job.skills or "VMware" in job.skills
+    assert job.salary_text == "$120,000/yr"
+    assert job.salary_min == 120000.0

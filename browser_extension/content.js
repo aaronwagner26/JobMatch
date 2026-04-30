@@ -95,25 +95,99 @@ function captureLinkedInSelectedDetail() {
 }
 
 function captureIndeedPage() {
+  const detail = captureIndeedSelectedDetail();
   const cards = Array.from(document.querySelectorAll('[data-jk], [data-testid="slider_item"], a[href*="/viewjob"]'));
+  if (cards.length === 0 && detail) {
+    return buildCapturePayload('indeed_job', 'Indeed', detail.company || detail.title, [detail]);
+  }
   const jobs = uniqueJobs(cards.map((node) => {
     const anchor = node.tagName === 'A' ? node : firstNode(node, ['a[href*="/viewjob"]', 'a[href*="jk="]', 'a[href*="/rc/clk"]', 'a[href*="/pagead/clk"]']);
     const container = node.tagName === 'A' ? node.closest('[data-jk], [data-testid="slider_item"], article, li, div') || node : node;
     const rawId = normalizeText(container?.getAttribute?.('data-jk') || anchor?.getAttribute?.('data-jk') || jobIdFromUrl(anchor?.href || ''));
     const url = canonicalIndeedJobUrl(anchor?.href || '', rawId);
+    const selected = detail && rawId && detail.raw_id === rawId ? detail : null;
     return {
       raw_id: rawId || url,
       title: text(anchor),
       company: firstText(container, ['.companyName', '[data-testid="company-name"]']),
       location: firstText(container, ['.companyLocation', '[data-testid="text-location"]']),
-      summary: firstText(container, ['.job-snippet', '[data-testid="job-snippet"]']),
-      description: '',
-      url,
+      summary: selected?.summary || firstText(container, ['.job-snippet', '[data-testid="job-snippet"]']),
+      description: selected?.description || '',
+      salary_text: selected?.salary_text || firstSalaryText(texts(container, ['.salary-snippet', '.estimated-salary', '[class*="salary"]', '[data-testid="attribute_snippet_testid"]'])),
+      employment_text: selected?.employment_text || '',
+      url: selected?.url || url,
       posted_at: firstText(container, ['.date', 'time']),
     };
   }));
+  if (jobs.length === 0 && detail) {
+    jobs.push(detail);
+  }
   const queryLabel = firstText(document, ['h1', '[data-testid="jobsearch-HeroLabel"]']) || document.title;
   return buildCapturePayload('indeed_search', 'Indeed', queryLabel, jobs);
+}
+
+function captureIndeedSelectedDetail() {
+  const jsonLdJobs = extractJsonLdJobs();
+  const locationUrl = absoluteUrl(location.href);
+  const rawId = normalizeText(
+    jobIdFromUrl(locationUrl)
+    || firstNode(document, ['[data-jk][aria-current="true"]', '[data-jk][data-testid="slider_item"]'])?.getAttribute('data-jk')
+    || ''
+  );
+  const title = firstText(document, [
+    'h1',
+    '[data-testid="jobsearch-JobInfoHeader-title"]',
+    '[data-testid="viewJobTitle"]',
+  ]);
+  const jsonLdMatch = jsonLdJobs.find((job) => job.raw_id === rawId || (title && job.title === title)) || null;
+  const description = firstText(document, [
+    '#jobDescriptionText',
+    '.jobsearch-JobComponent-description',
+    '.jobsearch-jobDescriptionText',
+    '.jobDescriptionText',
+    'article',
+    'main',
+  ]) || jsonLdMatch?.description || '';
+  const salaryCandidates = [
+    ...texts(document, [
+      '.salaryText',
+      '[data-testid="salaryInfoAndJobType"]',
+      '[data-testid="attribute_snippet_testid"]',
+      '[class*="salary"]',
+    ]),
+    jsonLdMatch?.salary_text || '',
+  ].filter(Boolean);
+  const salaryText = firstSalaryText(salaryCandidates);
+  const employmentText = texts(document, [
+    '[data-testid="salaryInfoAndJobType"]',
+    '[data-testid="attribute_snippet_testid"]',
+  ]).filter((value) => value && value !== salaryText).join(' | ');
+  const company = firstText(document, [
+    '.companyName',
+    '[data-testid="inlineHeader-companyName"]',
+    '[data-company-name="true"]',
+    '.jobsearch-CompanyInfoContainer a',
+  ]) || jsonLdMatch?.company || '';
+  const detailTitle = title || jsonLdMatch?.title || '';
+  if (!detailTitle && !rawId) {
+    return null;
+  }
+  return {
+    raw_id: rawId || jsonLdMatch?.raw_id || locationUrl,
+    title: detailTitle,
+    company,
+    location: firstText(document, [
+      '.companyLocation',
+      '[data-testid="inlineHeader-companyLocation"]',
+      '[data-testid="job-location"]',
+    ]) || jsonLdMatch?.location || '',
+    summary: jsonLdMatch?.summary || excerpt(description, 280),
+    description,
+    salary_text: salaryText,
+    employment_text: employmentText,
+    url: canonicalIndeedJobUrl(jsonLdMatch?.url || locationUrl, rawId || jsonLdMatch?.raw_id || ''),
+    posted_at: firstText(document, ['.date', '[data-testid="myJobsStateDate"]', 'time']),
+  };
 }
 
 function captureGenericPage() {
@@ -135,6 +209,7 @@ function captureGenericPage() {
           location: firstText(container, ['.location', '[itemprop="jobLocation"]']),
           summary: firstText(container, ['.description', '.summary', 'p']),
           description: '',
+          salary_text: firstSalaryText(texts(container, ['.salary', '.salary-range', '.compensation', '[class*="salary"]'])),
           url,
         };
       })
@@ -208,6 +283,7 @@ function collectJsonLdJob(payload, jobs) {
       summary: normalizeText(payload.description || ''),
       description: normalizeText(payload.description || ''),
       employment_text: normalizeText(payload.employmentType || ''),
+      salary_text: jsonLdSalaryText(payload),
       posted_at: payload.datePosted || '',
       url: absoluteUrl(payload.url || ''),
     });
@@ -327,10 +403,105 @@ function firstText(root, selectors) {
   return text(node);
 }
 
+function texts(root, selectors) {
+  const values = [];
+  const seen = new Set();
+  for (const selector of selectors) {
+    for (const node of root.querySelectorAll(selector)) {
+      const value = text(node);
+      if (!value) {
+        continue;
+      }
+      const folded = value.toLowerCase();
+      if (seen.has(folded)) {
+        continue;
+      }
+      seen.add(folded);
+      values.push(value);
+    }
+  }
+  return values;
+}
+
+function firstSalaryText(values) {
+  for (const value of values) {
+    if (looksLikeSalaryText(value)) {
+      return value;
+    }
+  }
+  return values[0] || '';
+}
+
 function text(node) {
   return normalizeText(node?.textContent || '');
 }
 
 function normalizeText(value) {
   return String(value || '').replace(/\s+/g, ' ').trim();
+}
+
+function looksLikeSalaryText(value) {
+  const textValue = normalizeText(value);
+  if (!textValue) {
+    return false;
+  }
+  if (/[$€£]|usd/i.test(textValue)) {
+    return true;
+  }
+  return /\b(?:salary|compensation|pay|hourly|annual|year|month|week|day|hr|yr)\b/i.test(textValue);
+}
+
+function excerpt(value, limit) {
+  const normalized = normalizeText(value);
+  if (normalized.length <= limit) {
+    return normalized;
+  }
+  return `${normalized.slice(0, Math.max(limit - 1, 0)).trimEnd()}…`;
+}
+
+function jsonLdSalaryText(payload) {
+  const baseSalary = payload?.baseSalary;
+  if (!baseSalary || typeof baseSalary !== 'object') {
+    return '';
+  }
+  const value = baseSalary.value;
+  if (!value || typeof value !== 'object') {
+    return '';
+  }
+  const minValue = Number(value.minValue ?? value.value ?? NaN);
+  const maxValue = Number(value.maxValue ?? value.value ?? NaN);
+  if (!Number.isFinite(minValue) && !Number.isFinite(maxValue)) {
+    return '';
+  }
+  const currency = String(baseSalary.currency || 'USD').toUpperCase();
+  const prefix = currency === 'USD' ? '$' : `${currency} `;
+  const left = Number.isFinite(minValue) ? formatSalaryAmount(minValue) : '';
+  const right = Number.isFinite(maxValue) ? formatSalaryAmount(maxValue) : left;
+  let display = left && right && left !== right ? `${prefix}${left} - ${prefix}${right}` : `${prefix}${left || right}`;
+  const unit = String(value.unitText || '').toLowerCase();
+  if (unit.includes('hour')) {
+    display += '/hr';
+  } else if (unit.includes('week')) {
+    display += '/wk';
+  } else if (unit.includes('month')) {
+    display += '/mo';
+  } else if (unit.includes('day')) {
+    display += '/day';
+  } else {
+    display += '/yr';
+  }
+  return display;
+}
+
+function formatSalaryAmount(value) {
+  if (!Number.isFinite(value)) {
+    return '';
+  }
+  if (value >= 1000) {
+    return Math.round(value).toLocaleString('en-US');
+  }
+  if (Math.floor(value) === value) {
+    return String(value);
+  }
+  return value.toFixed(2);
 }
