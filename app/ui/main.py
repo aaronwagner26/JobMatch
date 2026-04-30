@@ -95,7 +95,7 @@ ui.add_css(
     body.body--dark .app-header { background: rgba(3, 7, 18, 0.96); }
     .app-header .q-btn, .app-header .q-toggle, .app-header .q-field__native, .app-header .text-white { color: #f8fafc; }
     .app-shell { min-height: calc(100vh - 64px); background: var(--app-bg); }
-    .app-drawer { background: var(--app-surface); border-right: 1px solid var(--app-border); }
+    .app-drawer { width: 13rem !important; background: var(--app-surface); border-right: 1px solid var(--app-border); }
     .drawer-brand { font-size: 0.75rem; letter-spacing: 0.16em; text-transform: uppercase; color: var(--app-muted); }
     .drawer-title { font-size: 1.2rem; font-weight: 700; color: var(--app-text); }
     .nav-button { justify-content: flex-start; width: 100%; text-transform: none; border-radius: 12px; padding: 0.35rem 0.5rem; }
@@ -293,8 +293,8 @@ class JobMatchUI:
                 with ui.row().classes("items-center gap-3"):
                     ui.label("Browser capture ready").classes("text-slate-300 text-sm")
 
-        with ui.left_drawer(value=True, bordered=False, elevated=False).classes("app-drawer w-64"):
-            self.nav_shell = ui.column().classes("w-full gap-3 p-4")
+        with ui.left_drawer(value=True, bordered=False, elevated=False).classes("app-drawer"):
+            self.nav_shell = ui.column().classes("w-full gap-3 p-3")
             self.render_sidebar()
 
         with ui.column().classes("app-shell w-full"):
