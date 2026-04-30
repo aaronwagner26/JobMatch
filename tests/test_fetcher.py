@@ -708,3 +708,36 @@ def test_parse_clearance_detail_payload_prefers_requirements_and_description() -
     assert "Required Clearance: Top Secret/DOE Q" in payload["description"]
     assert "Clearance Unspecified" in payload["requirements_text"]
     assert payload["salary_text"] == ""
+
+
+def test_prepare_payload_requires_detail_for_known_listing_missing_salary() -> None:
+    fetcher = JobFetcher(JobNormalizer())
+    source = JobSourceConfig(
+        id=13,
+        name="ClearanceJobs Search",
+        source_type="clearance",
+        url="https://www.clearancejobs.com/jobs?remote=1&keywords=information+technology",
+        request_delay_ms=0,
+    )
+    payload = {
+        "raw_id": "job-1",
+        "title": "Senior Cloud Network Engineer (AWS)",
+        "company": "Leidos",
+        "location": "Remote",
+        "summary": "AWS networking and federal cloud work",
+        "url": "https://www.clearancejobs.com/jobs/8887968/senior-cloud-network-engineer-aws",
+    }
+    listing_hash = fetcher.normalizer.build_listing_hash(source, payload)
+    known_jobs = {
+        "job-1": {
+            "listing_hash": listing_hash,
+            "description": "Existing stored description",
+            "employment_text": "",
+            "salary_text": "",
+        }
+    }
+
+    prepared = fetcher._prepare_payload(source, payload, known_jobs)
+
+    assert prepared["_known_listing"] is True
+    assert prepared["_requires_detail"] is True

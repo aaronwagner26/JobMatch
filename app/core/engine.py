@@ -10,7 +10,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from app.core.job_fetcher import JobFetcher
+from app.core.job_fetcher import JobFetcher, SourceThrottle
 from app.core.matcher import JobMatcher
 from app.core.normalizer import JobNormalizer
 from app.core.ollama_service import OllamaEnricher, OllamaStatus
@@ -186,11 +186,16 @@ class JobMatchEngine:
 
         source = self._resolve_browser_capture_source(page_url, page or {}, source_meta or {}, jobs_payload)
         llm_enricher = self._make_ollama_enricher()
-        normalized_jobs = []
+        prepared_payloads: list[dict[str, object]] = []
         for item in jobs_payload:
             if not isinstance(item, dict):
                 continue
             prepared = self._prepare_browser_capture_payload(source, item, page or {}, page_url, payload)
+            prepared_payloads.append(prepared)
+        prepared_payloads = self._enrich_browser_capture_payloads(source, prepared_payloads, page_url)
+
+        normalized_jobs = []
+        for prepared in prepared_payloads:
             try:
                 normalized_jobs.append(self.job_fetcher.normalizer.normalize(source, prepared, llm_enricher=llm_enricher))
             except Exception:
@@ -605,6 +610,67 @@ class JobMatchEngine:
             raw_id = normalize_whitespace(str(payload["url"]))
         payload["raw_id"] = raw_id
         return payload
+
+    def _enrich_browser_capture_payloads(
+        self,
+        source: JobSourceConfig,
+        payloads: list[dict[str, object]],
+        page_url: str,
+    ) -> list[dict[str, object]]:
+        candidates = [payload for payload in payloads if self._browser_capture_payload_needs_detail(payload, page_url)]
+        if not candidates:
+            return payloads
+        return asyncio.run(self._enrich_browser_capture_payloads_async(source, payloads, candidates))
+
+    async def _enrich_browser_capture_payloads_async(
+        self,
+        source: JobSourceConfig,
+        payloads: list[dict[str, object]],
+        candidates: list[dict[str, object]],
+    ) -> list[dict[str, object]]:
+        throttle = SourceThrottle(0)
+        semaphore = asyncio.Semaphore(6)
+
+        async def enrich(payload: dict[str, object]) -> None:
+            async with semaphore:
+                url = normalize_whitespace(str(payload.get("url") or ""))
+                if not url:
+                    return
+                html = await self.job_fetcher._fetch_job_url_html(source, url, throttle=throttle)
+                if not html:
+                    return
+                detail_payload = self.job_fetcher._parse_job_detail_payload(html, url, source)
+                if not detail_payload:
+                    return
+                for field in [
+                    "company",
+                    "location",
+                    "description",
+                    "requirements_text",
+                    "preferred_text",
+                    "salary_text",
+                    "employment_text",
+                    "posted_at",
+                    "job_type",
+                    "remote_mode",
+                ]:
+                    detail_value = detail_payload.get(field)
+                    if detail_value:
+                        payload[field] = detail_value
+
+        await asyncio.gather(*(enrich(payload) for payload in candidates))
+        return payloads
+
+    @staticmethod
+    def _browser_capture_payload_needs_detail(payload: dict[str, object], page_url: str) -> bool:
+        url = normalize_whitespace(str(payload.get("url") or page_url))
+        host = urlsplit(url).netloc.casefold()
+        if "clearancejobs.com" not in host:
+            return False
+        description = clean_job_text(str(payload.get("description") or ""))
+        requirements_text = clean_job_text(str(payload.get("requirements_text") or ""))
+        salary_text = normalize_whitespace(str(payload.get("salary_text") or ""))
+        return (not salary_text) or len(description) < 220 or not requirements_text
 
     @staticmethod
     def _browser_capture_source_name(company: str, site_name: str, page_title: str) -> str:

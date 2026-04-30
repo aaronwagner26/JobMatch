@@ -281,6 +281,7 @@ class Storage:
                     "canonical_url": metadata.get("canonical_url") or record.url,
                     "description": record.description,
                     "employment_text": record.employment_text,
+                    "salary_text": getattr(record, "salary_text", None),
                     "active": record.active,
                     "last_seen_at": record.last_seen_at,
                 }

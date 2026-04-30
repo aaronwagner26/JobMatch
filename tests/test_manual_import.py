@@ -281,6 +281,59 @@ def test_browser_capture_reimport_updates_indeed_urls_even_when_content_is_uncha
     assert repaired.metadata["canonical_url"] == "https://www.indeed.com/viewjob?jk=job-a"
 
 
+def test_browser_capture_import_enriches_clearancejobs_salary_from_detail_page() -> None:
+    storage = Storage("sqlite+pysqlite:///:memory:")
+    engine = JobMatchEngine(storage=storage)
+    payload = {
+        "parser": "clearance_search",
+        "page": {
+            "url": "https://www.clearancejobs.com/jobs?remote=1&keywords=information+technology",
+            "title": "Information Technology jobs | ClearanceJobs",
+            "site": "ClearanceJobs",
+        },
+        "source": {
+            "site": "ClearanceJobs",
+        },
+        "jobs": [
+            {
+                "raw_id": "https://www.clearancejobs.com/jobs/8887968/senior-cloud-network-engineer-aws",
+                "title": "Senior Cloud Network Engineer (AWS)",
+                "company": "Leidos",
+                "location": "Remote",
+                "summary": "AWS networking and federal cloud work",
+                "url": "https://www.clearancejobs.com/jobs/8887968/senior-cloud-network-engineer-aws",
+                "salary_text": "",
+            },
+        ],
+    }
+
+    async def fake_fetch_job_url_html(source, url, *, throttle):  # noqa: ANN001
+        return "<html></html>"
+
+    def fake_parse_job_detail_payload(html, url, source):  # noqa: ANN001
+        return {
+            "raw_id": url,
+            "title": "Senior Cloud Network Engineer (AWS)",
+            "company": "Leidos",
+            "location": "Remote",
+            "description": "Full ClearanceJobs description",
+            "requirements_text": "Job Requirements Remote Public Trust Polygraph Unspecified Career Level not specified $107,900 - $195,050",
+            "salary_text": "$107,900 - $195,050",
+            "employment_text": "",
+            "url": url,
+        }
+
+    engine.job_fetcher._fetch_job_url_html = fake_fetch_job_url_html  # type: ignore[method-assign]
+    engine.job_fetcher._parse_job_detail_payload = fake_parse_job_detail_payload  # type: ignore[method-assign]
+
+    result = engine.import_browser_capture(payload)
+
+    assert result["jobs_imported"] == 1
+    jobs = storage.list_jobs()
+    assert len(jobs) == 1
+    assert jobs[0].salary_text == "$107,900 - $195,050"
+
+
 def test_list_filtered_jobs_can_return_cached_or_deduped_views() -> None:
     storage = Storage("sqlite+pysqlite:///:memory:")
     engine = JobMatchEngine(storage=storage)

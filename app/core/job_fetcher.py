@@ -1010,12 +1010,20 @@ class JobFetcher:
             prepared["description"] = prepared.get("description") or snapshot["description"]
         if snapshot and snapshot.get("employment_text") and not prepared.get("employment_text"):
             prepared["employment_text"] = snapshot["employment_text"]
+        if snapshot and snapshot.get("salary_text") and not prepared.get("salary_text"):
+            prepared["salary_text"] = snapshot["salary_text"]
+        refetch_for_missing_salary = (
+            self._determine_source_type(source) == "clearance"
+            and not prepared.get("salary_text")
+            and not (snapshot or {}).get("salary_text")
+        )
 
         prepared["_known_snapshot"] = snapshot
         prepared["_known_listing"] = bool(snapshot and snapshot.get("listing_hash") == prepared["listing_hash"])
         prepared["_requires_detail"] = bool(
             snapshot is None
             or not snapshot.get("description")
+            or refetch_for_missing_salary
             or snapshot.get("listing_hash") != prepared["listing_hash"]
         )
         return prepared
