@@ -853,21 +853,23 @@ class JobFetcher:
         salary_text = self._best_salary_text(
             soup,
             [
-                ".salaryText",
+                "#jobDetailsSection [aria-label='Pay'] li",
+                "#jobDetailsSection [aria-label='Pay'] [data-testid='list-item']",
+                "#jobDetailsSection [aria-label='Pay'] span",
                 "#salaryInfoAndJobType",
                 "[data-testid='salaryInfoAndJobType']",
-                ".jobsearch-OtherJobDetailsContainer",
                 "[data-testid='jobsearch-CollapsedEmbeddedHeader-salary']",
-                "#jobDetailsSection [aria-label='Pay']",
-                "[data-testid='attribute_snippet_testid']",
-                "[class*='salary']",
+                ".salaryText",
+                ".jobsearch-OtherJobDetailsContainer",
             ],
         )
         employment_text = self._joined_text(
             soup,
             [
-                "#salaryInfoAndJobType",
-                "[data-testid='salaryInfoAndJobType']",
+                "#jobDetailsSection [aria-label='Job type'] li",
+                "#jobDetailsSection [aria-label='Job type'] [data-testid='list-item']",
+                "#jobDetailsSection [aria-label='Work setting'] li",
+                "#jobDetailsSection [aria-label='Work setting'] [data-testid='list-item']",
                 "[data-testid='attribute_snippet_testid']",
             ],
             exclude={salary_text} if salary_text else None,
@@ -1701,6 +1703,11 @@ class JobFetcher:
     def _salary_text_rank(text: str) -> tuple[int, int]:
         info = extract_salary_info(text)
         score = 0
+        employment_noise = re.search(
+            r"\b(?:contract|full[\s-]?time|part[\s-]?time|temporary|temp[\s-]?to[\s-]?hire|day shift|night shift|weekends?|overtime|remote|hybrid|on[\s-]?site|work setting)\b",
+            text,
+            flags=re.IGNORECASE,
+        )
         if info.get("display"):
             score += 20
         minimum = info.get("minimum")
@@ -1721,4 +1728,8 @@ class JobFetcher:
             score += 3
         if re.search(r"\b\d+(?:\.\d+)?\s*(?:-|to|and|through)\s*\d+(?:\.\d+)?\s+years?\b", text, flags=re.IGNORECASE):
             score -= 12
-        return score, len(text)
+        if employment_noise:
+            score -= 6
+        if info.get("display") and not employment_noise and "|" not in text:
+            score += 2
+        return score, -len(text)

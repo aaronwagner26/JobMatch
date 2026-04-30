@@ -51,3 +51,52 @@ def test_parse_job_detail_payload_reads_indeed_embedded_salary_container() -> No
 
     assert payload is not None
     assert payload["salary_text"].startswith("$140,000 - $175,000 a year")
+
+
+def test_parse_job_detail_payload_reads_hourly_pay_from_indeed_job_details_section() -> None:
+    fetcher = JobFetcher(JobNormalizer())
+    source = JobSourceConfig(
+        id=1,
+        name="Indeed Search",
+        source_type="indeed",
+        url="https://www.indeed.com/jobs?q=cybersecurity&l=Remote",
+    )
+    html = """
+    <html>
+      <body>
+        <h1>OT Cybersecurity specialist - Remote</h1>
+        <div data-testid="inlineHeader-companyName">Calance US</div>
+        <div data-testid="inlineHeader-companyLocation">Houston, TX 77010 • Remote</div>
+        <div id="salaryInfoAndJobType">
+          <span>$70 - $85 an hour</span>
+          <span> - Contract</span>
+        </div>
+        <div id="jobDetailsSection">
+          <div aria-label="Pay">
+            <ul>
+              <li>$70 - $85 an hour</li>
+            </ul>
+          </div>
+          <div aria-label="Job type">
+            <ul>
+              <li>Contract</li>
+            </ul>
+          </div>
+          <div aria-label="Work setting">
+            <ul>
+              <li>Remote</li>
+            </ul>
+          </div>
+        </div>
+        <div id="jobDescriptionText">
+          <p>OT security generalist role with Windows and Splunk experience.</p>
+        </div>
+      </body>
+    </html>
+    """
+
+    payload = fetcher._parse_job_detail_payload(html, "https://www.indeed.com/viewjob?jk=3f4fd920a4f8a8b4", source)
+
+    assert payload is not None
+    assert payload["salary_text"] == "$70 - $85 an hour"
+    assert "Contract" in payload["employment_text"]

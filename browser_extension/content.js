@@ -192,22 +192,30 @@ function captureIndeedSelectedDetail(rawIdHint = '', options = {}) {
     '.jobsearch-jobDescriptionText',
     '.jobDescriptionText',
   ]) || jsonLdMatch?.description || '';
+  const explicitSalaryCandidates = texts(document, [
+    '#jobDetailsSection [aria-label="Pay"] li',
+    '#jobDetailsSection [aria-label="Pay"] [data-testid="list-item"]',
+    '#jobDetailsSection [aria-label="Pay"] span',
+    '#salaryInfoAndJobType',
+    '[data-testid="salaryInfoAndJobType"]',
+    '[data-testid="jobsearch-CollapsedEmbeddedHeader-salary"]',
+    '.salaryText',
+  ]);
+  const fallbackSalaryCandidates = texts(document, [
+    '.jobsearch-OtherJobDetailsContainer',
+    '[data-testid="attribute_snippet_testid"]',
+    '[class*="salary"]',
+  ]);
   const salaryCandidates = [
-    ...texts(document, [
-      '.salaryText',
-      '#salaryInfoAndJobType',
-      '[data-testid="salaryInfoAndJobType"]',
-      '.jobsearch-OtherJobDetailsContainer',
-      '[data-testid="jobsearch-CollapsedEmbeddedHeader-salary"]',
-      '#jobDetailsSection [aria-label="Pay"]',
-      '[data-testid="attribute_snippet_testid"]',
-      '[class*="salary"]',
-    ]),
+    ...(explicitSalaryCandidates.length ? explicitSalaryCandidates : fallbackSalaryCandidates),
     jsonLdMatch?.salary_text || '',
   ].filter(Boolean);
   const salaryText = firstSalaryText(salaryCandidates);
   const employmentText = texts(document, [
-    '[data-testid="salaryInfoAndJobType"]',
+    '#jobDetailsSection [aria-label="Job type"] li',
+    '#jobDetailsSection [aria-label="Job type"] [data-testid="list-item"]',
+    '#jobDetailsSection [aria-label="Work setting"] li',
+    '#jobDetailsSection [aria-label="Work setting"] [data-testid="list-item"]',
     '[data-testid="attribute_snippet_testid"]',
   ]).filter((value) => value && value !== salaryText).join(' | ');
   const company = firstText(document, [
@@ -558,7 +566,7 @@ function firstSalaryText(values) {
   const ranked = values
     .filter(Boolean)
     .map((value) => ({ value, score: salaryScore(value) }))
-    .sort((left, right) => right.score - left.score || right.value.length - left.value.length);
+    .sort((left, right) => right.score - left.score || left.value.length - right.value.length);
   return ranked[0]?.value || '';
 }
 
@@ -593,6 +601,7 @@ function salaryScore(value) {
     return 0;
   }
   let score = 0;
+  const employmentNoise = /\b(?:contract|full[\s-]?time|part[\s-]?time|temporary|temp[\s-]?to[\s-]?hire|day shift|night shift|weekends?|overtime|remote|hybrid|on[\s-]?site|work setting)\b/i.test(textValue);
   if (looksLikeSalaryText(textValue)) {
     score += 3;
   }
@@ -611,7 +620,13 @@ function salaryScore(value) {
   if (/\b\d+(?:\.\d+)?\s*(?:-|to|and|through)\s*\d+(?:\.\d+)?\s+years?\b/i.test(textValue) && !/[$â‚¬Â£]|usd/i.test(textValue)) {
     score -= 12;
   }
-  return score + Math.min(textValue.length, 120) / 40;
+  if (employmentNoise) {
+    score -= 6;
+  }
+  if (!employmentNoise && !/\|/.test(textValue)) {
+    score += 2;
+  }
+  return score;
 }
 
 function excerpt(value, limit) {
