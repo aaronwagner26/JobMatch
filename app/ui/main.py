@@ -311,6 +311,7 @@ class UIState:
     scan_rows: list[dict[str, Any]] = field(default_factory=list)
     scan_log_lines: list[str] = field(default_factory=list)
     recent_scans: list[dict[str, Any]] = field(default_factory=list)
+    browser_capture_progress: dict[str, Any] = field(default_factory=dict)
     last_scan_text: str = "Never"
     selected_source_id: int | None = None
     manual_job_urls: str = ""
@@ -380,6 +381,7 @@ class JobMatchUI:
             self.render_current_view()
             self._start_background_task(self._bootstrap_after_mount())
             self._start_background_task(self._schedule_loop())
+            self._start_background_task(self._browser_capture_progress_loop())
 
     async def _bootstrap_after_mount(self) -> None:
         await asyncio.sleep(0.2)
@@ -393,6 +395,41 @@ class JobMatchUI:
             if self._client_deleted:
                 break
             await self.schedule_tick()
+
+    async def _browser_capture_progress_loop(self) -> None:
+        while not self._client_deleted:
+            await asyncio.sleep(1.0)
+            if self._client_deleted:
+                break
+            progress = await asyncio.to_thread(self.engine.get_browser_capture_progress)
+            if progress == self.state.browser_capture_progress:
+                continue
+            previous = dict(self.state.browser_capture_progress)
+            self.state.browser_capture_progress = progress
+            was_active = bool(previous.get("active"))
+            is_active = bool(progress.get("active"))
+
+            if is_active and not self.state.scan_running:
+                self.state.scan_status = str(progress.get("status") or "Importing browser capture...")
+                if self.status_label is not None:
+                    self.status_label.set_text(self.state.scan_status)
+            elif was_active and not is_active and not self.state.scan_running:
+                self.state.scan_status = "Ready"
+                if self.status_label is not None:
+                    self.status_label.set_text("Ready")
+                self.state.recent_scans = self.engine.list_recent_scans(limit=8)
+                if progress.get("error"):
+                    self._append_activity(f"Browser capture import failed: {progress.get('error')}")
+                elif int(progress.get("imported_jobs") or 0):
+                    self._append_activity(
+                        f"Browser capture import finished for {progress.get('source_name') or 'captured jobs'}: "
+                        f"{progress.get('jobs_created', 0)} new, {progress.get('jobs_updated', 0)} updated, "
+                        f"{progress.get('jobs_unchanged', 0)} unchanged."
+                    )
+                    await self.refresh_matches(record_activity=False)
+
+            self.render_scan_summary_panel()
+            self.render_scan_log_panel()
 
     def _start_background_task(self, coroutine) -> None:
         task = asyncio.create_task(coroutine)
@@ -1221,6 +1258,8 @@ class JobMatchUI:
             return
         self.scan_summary_panel.clear()
         totals = self._scan_totals()
+        browser_progress = self.state.browser_capture_progress or {}
+        browser_active = bool(browser_progress.get("active"))
         with self.scan_summary_panel:
             with ui.row().classes("w-full items-start justify-between"):
                 with ui.column().classes("gap-1"):
@@ -1240,12 +1279,27 @@ class JobMatchUI:
                     "info-banner text-sm"
                 )
 
+            if browser_active:
+                source_name = str(browser_progress.get("source_name") or "Browser Capture")
+                status = str(browser_progress.get("status") or "Importing browser capture...")
+                ui.label(f"{source_name}: {status}").classes("info-banner text-sm")
+
             with ui.element("div").classes("scan-metrics"):
-                self._stat_block("Progress", f"{self.state.scan_sources_finished}/{max(self.state.scan_source_total, len(self.state.scan_rows)) or 0}")
-                self._stat_block("New", str(totals["created"]))
-                self._stat_block("Updated", str(totals["updated"]))
-                self._stat_block("Unchanged", str(totals["unchanged"]))
-                self._stat_block("Issues", str(totals["issues"]))
+                if browser_active and not self.state.scan_running:
+                    self._stat_block("Prepared", f"{int(browser_progress.get('prepared_jobs') or 0)}/{int(browser_progress.get('total_jobs') or 0)}")
+                    self._stat_block("Normalized", str(int(browser_progress.get("normalized_jobs") or 0)))
+                    self._stat_block("Valid", str(int(browser_progress.get("valid_jobs") or 0)))
+                    ollama_limit = int(browser_progress.get("ollama_limit") or 0)
+                    ollama_used = int(browser_progress.get("ollama_used") or 0)
+                    ollama_value = f"{ollama_used}/{ollama_limit}" if ollama_limit > 0 else str(ollama_used)
+                    self._stat_block("Ollama", ollama_value)
+                    self._stat_block("Imported", str(int(browser_progress.get("imported_jobs") or 0)))
+                else:
+                    self._stat_block("Progress", f"{self.state.scan_sources_finished}/{max(self.state.scan_source_total, len(self.state.scan_rows)) or 0}")
+                    self._stat_block("New", str(totals["created"]))
+                    self._stat_block("Updated", str(totals["updated"]))
+                    self._stat_block("Unchanged", str(totals["unchanged"]))
+                    self._stat_block("Issues", str(totals["issues"]))
 
             if self.state.scan_rows:
                 rows = [self._scan_row_payload(row) for row in self.state.scan_rows]

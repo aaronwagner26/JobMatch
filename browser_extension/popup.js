@@ -438,7 +438,7 @@ function normalizePageCount(value) {
   if (!Number.isFinite(parsed)) {
     return 1;
   }
-  return Math.max(1, Math.min(parsed, 5));
+  return Math.max(1, Math.min(parsed, 10));
 }
 
 function errorMessage(error) {

@@ -131,6 +131,10 @@ class OllamaEnricher:
         status = self.status()
         return status.available
 
+    @property
+    def job_enrichments_used(self) -> int:
+        return self._job_enrichments_used
+
     def _generate_json(self, prompt: str) -> dict[str, Any]:
         try:
             response = httpx.post(

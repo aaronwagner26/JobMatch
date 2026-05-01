@@ -43,6 +43,7 @@ class JobMatchEngine:
         self._scan_lock = asyncio.Lock()
         self._scan_cancel_requested = asyncio.Event()
         self._matcher_cache: dict[tuple[str, float, float, float], JobMatcher] = {}
+        self._browser_capture_progress: dict[str, object] = {"active": False, "status": "Idle"}
 
     def save_resume(self, source_path: str | Path) -> ResumeProfile:
         path = Path(source_path)
@@ -148,6 +149,9 @@ class JobMatchEngine:
         self.storage.set_setting("browser_api_token", token)
         return token
 
+    def get_browser_capture_progress(self) -> dict[str, object]:
+        return dict(self._browser_capture_progress)
+
     def clear_scan_results(self) -> None:
         if self._scan_lock.locked():
             raise RuntimeError("Stop the active scan before clearing cached results.")
@@ -206,6 +210,23 @@ class JobMatchEngine:
         jobs_payload = payload.get("jobs")
         if not isinstance(jobs_payload, list) or not jobs_payload:
             raise ValueError("Browser capture did not include any jobs.")
+        total_jobs = sum(1 for item in jobs_payload if isinstance(item, dict))
+        started_at = datetime.now(UTC).isoformat()
+        self._set_browser_capture_progress(
+            active=True,
+            status="Preparing captured jobs...",
+            source_name="Browser Capture",
+            total_jobs=total_jobs,
+            prepared_jobs=0,
+            normalized_jobs=0,
+            valid_jobs=0,
+            imported_jobs=0,
+            ollama_used=0,
+            ollama_limit=0,
+            error="",
+            started_at=started_at,
+            finished_at="",
+        )
 
         page = payload.get("page") if isinstance(payload.get("page"), dict) else {}
         source_meta = payload.get("source") if isinstance(payload.get("source"), dict) else {}
@@ -218,49 +239,92 @@ class JobMatchEngine:
             "browser_capture",
         )
         if not page_url:
+            self._set_browser_capture_progress(active=False, status="Browser capture failed", error="Browser capture is missing the page URL.", finished_at=datetime.now(UTC).isoformat())
             raise ValueError("Browser capture is missing the page URL.")
 
-        source = self._resolve_browser_capture_source(page_url, page or {}, source_meta or {}, jobs_payload)
-        llm_enricher = self._make_ollama_enricher()
-        prepared_payloads: list[dict[str, object]] = []
-        for item in jobs_payload:
-            if not isinstance(item, dict):
-                continue
-            prepared = self._prepare_browser_capture_payload(source, item, page or {}, page_url, payload)
-            prepared_payloads.append(prepared)
-        prepared_payloads = self._enrich_browser_capture_payloads(source, prepared_payloads, page_url)
+        try:
+            source = self._resolve_browser_capture_source(page_url, page or {}, source_meta or {}, jobs_payload)
+            llm_enricher = self._make_ollama_enricher()
+            ollama_limit = (
+                int(llm_enricher.max_job_enrichments)
+                if llm_enricher is not None and bool(llm_enricher.job_enabled)
+                else 0
+            )
+            self._set_browser_capture_progress(
+                source_name=source.name,
+                source_url=source.url,
+                ollama_limit=ollama_limit,
+            )
+            prepared_payloads: list[dict[str, object]] = []
+            prepared_count = 0
+            for item in jobs_payload:
+                if not isinstance(item, dict):
+                    continue
+                prepared = self._prepare_browser_capture_payload(source, item, page or {}, page_url, payload)
+                prepared_payloads.append(prepared)
+                prepared_count += 1
+                self._set_browser_capture_progress(prepared_jobs=prepared_count)
+            self._set_browser_capture_progress(status="Fetching extra detail where needed...")
+            prepared_payloads = self._enrich_browser_capture_payloads(source, prepared_payloads, page_url)
+            self._set_browser_capture_progress(status="Normalizing jobs and applying refinement...")
 
-        normalized_jobs = []
-        for prepared in prepared_payloads:
-            try:
-                normalized_jobs.append(self.job_fetcher.normalizer.normalize(source, prepared, llm_enricher=llm_enricher))
-            except Exception:
-                continue
+            normalized_jobs = []
+            for index, prepared in enumerate(prepared_payloads, start=1):
+                try:
+                    normalized_jobs.append(self.job_fetcher.normalizer.normalize(source, prepared, llm_enricher=llm_enricher))
+                except Exception:
+                    pass
+                self._set_browser_capture_progress(
+                    normalized_jobs=index,
+                    valid_jobs=len(normalized_jobs),
+                    ollama_used=llm_enricher.job_enrichments_used if llm_enricher is not None else 0,
+                )
 
-        if not normalized_jobs:
-            raise ValueError("No usable jobs were found in the browser capture.")
+            if not normalized_jobs:
+                self._set_browser_capture_progress(active=False, status="Browser capture failed", error="No usable jobs were found in the browser capture.", finished_at=datetime.now(UTC).isoformat())
+                raise ValueError("No usable jobs were found in the browser capture.")
 
-        scan_id = self.storage.begin_scan(source.id)
-        created, updated, unchanged = self.storage.merge_jobs(source, normalized_jobs)
-        self.storage.update_source_scan_state(source.id or 0, status="browser_capture")
-        self.storage.finish_scan(
-            scan_id,
-            status="browser_capture",
-            jobs_found=len(normalized_jobs),
-            jobs_created=created,
-            jobs_updated=updated,
-            jobs_unchanged=unchanged,
-            jobs_deactivated=0,
-        )
-        return {
-            "source_id": source.id,
-            "source_name": source.name,
-            "source_url": source.url,
-            "jobs_imported": len(normalized_jobs),
-            "jobs_created": created,
-            "jobs_updated": updated,
-            "jobs_unchanged": unchanged,
-        }
+            scan_id = self.storage.begin_scan(source.id)
+            self._set_browser_capture_progress(status="Saving imported jobs...")
+            created, updated, unchanged = self.storage.merge_jobs(source, normalized_jobs)
+            self.storage.update_source_scan_state(source.id or 0, status="browser_capture")
+            self.storage.finish_scan(
+                scan_id,
+                status="browser_capture",
+                jobs_found=len(normalized_jobs),
+                jobs_created=created,
+                jobs_updated=updated,
+                jobs_unchanged=unchanged,
+                jobs_deactivated=0,
+            )
+            self._set_browser_capture_progress(
+                active=False,
+                status="Browser capture import complete",
+                imported_jobs=len(normalized_jobs),
+                valid_jobs=len(normalized_jobs),
+                jobs_created=created,
+                jobs_updated=updated,
+                jobs_unchanged=unchanged,
+                finished_at=datetime.now(UTC).isoformat(),
+            )
+            return {
+                "source_id": source.id,
+                "source_name": source.name,
+                "source_url": source.url,
+                "jobs_imported": len(normalized_jobs),
+                "jobs_created": created,
+                "jobs_updated": updated,
+                "jobs_unchanged": unchanged,
+            }
+        except Exception as exc:
+            if bool(self._browser_capture_progress.get("active")):
+                self._set_browser_capture_progress(
+                    active=False,
+                    status="Browser capture failed",
+                    error=str(exc),
+                    finished_at=datetime.now(UTC).isoformat(),
+                )
+            raise
 
     def open_source_in_browser_profile(self, source_id: int) -> str:
         source = self.storage.get_source(source_id)
@@ -764,6 +828,11 @@ class JobMatchEngine:
             job_enabled=bool(settings.get("ollama_enhance_jobs", True)),
             max_job_enrichments=int(settings.get("ollama_max_job_enrichments", 20) or 0),
         )
+
+    def _set_browser_capture_progress(self, **updates: object) -> None:
+        next_state = dict(self._browser_capture_progress)
+        next_state.update(updates)
+        self._browser_capture_progress = next_state
 
     @staticmethod
     def _normalize_application_profile(profile: dict[str, object]) -> dict[str, object]:

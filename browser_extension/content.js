@@ -1,4 +1,4 @@
-const DETAIL_CAPTURE_LIMIT = 24;
+const DETAIL_CAPTURE_LIMIT = 50;
 const DETAIL_CAPTURE_TIMEOUT_MS = 1600;
 const DETAIL_CAPTURE_POLL_MS = 140;
 const MAX_CONSECUTIVE_DETAIL_SKIPS = 3;
@@ -667,7 +667,7 @@ function normalizeCapturePageCount(value) {
   if (!Number.isFinite(parsed)) {
     return 1;
   }
-  return Math.max(1, Math.min(parsed, 5));
+  return Math.max(1, Math.min(parsed, 10));
 }
 
 function findNextPaginationHref(root, pageUrl, predicate) {
