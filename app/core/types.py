@@ -94,6 +94,7 @@ class NormalizedJob:
 @dataclass(slots=True)
 class FilterCriteria:
     location_query: str = ""
+    salary_minimum: float | None = None
     remote_mode: str = "any"
     clearance_terms: list[str] = field(default_factory=list)
     job_type: str = "any"

@@ -7,6 +7,14 @@ from app.utils.text import unique_sorted
 
 
 class JobMatcher:
+    SALARY_ANNUAL_MULTIPLIERS = {
+        "hour": 2080.0,
+        "day": 260.0,
+        "week": 52.0,
+        "month": 12.0,
+        "year": 1.0,
+    }
+
     def __init__(self, model_name: str, weights: MatchWeights) -> None:
         self.embedding_service = EmbeddingService(model_name)
         self.weights = weights
@@ -118,6 +126,10 @@ class JobMatcher:
             return False
         if filters.job_type != "any" and (job.job_type or "unknown") != filters.job_type:
             return False
+        if filters.salary_minimum is not None and filters.salary_minimum > 0:
+            annual_salary_ceiling = JobMatcher._annual_salary_ceiling(job)
+            if annual_salary_ceiling is None or annual_salary_ceiling < filters.salary_minimum:
+                return False
         if filters.clearance_terms:
             job_clearance = {term.casefold() for term in job.clearance_terms}
             requested = {term.casefold() for term in filters.clearance_terms}
@@ -138,6 +150,32 @@ class JobMatcher:
                 if status != "not_interested":
                     return False
         return True
+
+    @staticmethod
+    def _annual_salary_ceiling(job: NormalizedJob) -> float | None:
+        amount = job.salary_max if job.salary_max is not None else job.salary_min
+        interval = job.salary_interval
+        if job.salary_text and (amount is None or not interval):
+            parsed = extract_salary_info(job.salary_text)
+            parsed_max = parsed.get("maximum")
+            parsed_min = parsed.get("minimum")
+            if amount is None:
+                if isinstance(parsed_max, (int, float)):
+                    amount = float(parsed_max)
+                elif isinstance(parsed_min, (int, float)):
+                    amount = float(parsed_min)
+            parsed_interval = parsed.get("interval")
+            if not interval and isinstance(parsed_interval, str) and parsed_interval:
+                interval = parsed_interval
+        if amount is None:
+            return None
+        return JobMatcher._annualize_salary(float(amount), interval)
+
+    @staticmethod
+    def _annualize_salary(amount: float, interval: str | None) -> float:
+        normalized_interval = (interval or "year").casefold().strip()
+        multiplier = JobMatcher.SALARY_ANNUAL_MULTIPLIERS.get(normalized_interval, 1.0)
+        return amount * multiplier
 
     @staticmethod
     def _build_reasons(

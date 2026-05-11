@@ -113,7 +113,7 @@ ui.add_css(
     .stat-strip { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0.75rem; width: 100%; }
     .stat-block { border-top: 1px solid var(--app-border); padding-top: 0.75rem; }
     .stat-value { font-size: 1.15rem; font-weight: 700; color: var(--app-text); }
-    .toolbar-grid { display: grid; grid-template-columns: 1.2fr 0.9fr 0.9fr 1.1fr 1fr auto auto auto; gap: 0.75rem; width: 100%; align-items: end; }
+    .toolbar-grid { display: grid; grid-template-columns: 1.45fr 0.8fr 0.85fr 1.05fr 0.95fr 0.75fr auto auto auto; gap: 0.75rem; width: 100%; align-items: end; }
     .toolbar-grid .q-field, .toolbar-grid .q-select, .toolbar-grid .q-input { width: 100%; }
     .results-shell .q-table__middle { max-height: calc(100vh - 300px); }
     .results-status-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.75rem; }
@@ -305,6 +305,7 @@ class UIState:
     sidebar_collapsed: bool = False
     results_mode: str = "matched"
     location_query: str = ""
+    salary_minimum: float | None = None
     remote_mode: str = "any"
     job_type: str = "any"
     application_state: str = "all"
@@ -592,6 +593,13 @@ class JobMatchUI:
         if self.state.current_view == "dashboard":
             self.render_current_view()
 
+    def set_salary_minimum(self, value: Any) -> None:
+        try:
+            numeric_value = float(value or 0)
+        except (TypeError, ValueError):
+            numeric_value = 0
+        self.state.salary_minimum = numeric_value if numeric_value > 0 else None
+
     def set_job_application_state(self, job_id: int, status: str) -> None:
         try:
             updated = self.engine.set_job_application_state(job_id, status)
@@ -687,6 +695,13 @@ class JobMatchUI:
                         label="Application",
                         on_change=lambda e: setattr(self.state, "application_state", str(e.value or "all")),
                     ).props("outlined dense")
+                    ui.number(
+                        "Min salary",
+                        value=self.state.salary_minimum,
+                        min=0,
+                        step=5000,
+                        on_change=lambda e: self.set_salary_minimum(e.value),
+                    ).props("outlined dense clearable prefix='$' suffix='/yr'")
                     ui.button("Apply", icon="filter_alt", on_click=lambda: asyncio.create_task(self.refresh_matches())).props("unelevated")
                     ui.button("Clear", icon="restart_alt", on_click=self.clear_filters).props("flat")
                     ui.label(f"{visible_count} shown").classes("self-center muted-copy text-right")
@@ -1884,6 +1899,7 @@ class JobMatchUI:
 
     def clear_filters(self) -> None:
         self.state.location_query = ""
+        self.state.salary_minimum = None
         self.state.remote_mode = "any"
         self.state.job_type = "any"
         self.state.application_state = "all"
@@ -1893,6 +1909,7 @@ class JobMatchUI:
     def current_filters(self) -> FilterCriteria:
         return FilterCriteria(
             location_query=self.state.location_query,
+            salary_minimum=self.state.salary_minimum,
             remote_mode=self.state.remote_mode,
             job_type=self.state.job_type,
             clearance_terms=self.state.clearance_terms,

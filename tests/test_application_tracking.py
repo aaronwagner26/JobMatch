@@ -5,7 +5,16 @@ from app.core.types import FilterCriteria, JobSourceConfig, NormalizedJob
 from app.db.storage import Storage
 
 
-def _sample_job(source, external_id: str, title: str) -> NormalizedJob:
+def _sample_job(
+    source,
+    external_id: str,
+    title: str,
+    *,
+    salary_min: float | None = None,
+    salary_max: float | None = None,
+    salary_interval: str | None = None,
+    salary_text: str | None = None,
+) -> NormalizedJob:
     return NormalizedJob(
         id=None,
         source_id=source.id,
@@ -18,11 +27,11 @@ def _sample_job(source, external_id: str, title: str) -> NormalizedJob:
         remote_mode="remote",
         job_type="full-time",
         clearance_terms=[],
-        salary_min=None,
-        salary_max=None,
-        salary_currency=None,
-        salary_interval=None,
-        salary_text=None,
+        salary_min=salary_min,
+        salary_max=salary_max,
+        salary_currency="USD" if salary_min is not None or salary_max is not None else None,
+        salary_interval=salary_interval,
+        salary_text=salary_text,
         posted_at=None,
         url=f"https://example.com/jobs/{external_id}",
         description="Python and AWS role",
@@ -114,6 +123,59 @@ def test_search_filter_checks_title_company_source_and_description() -> None:
     assert [job.external_id for job in title_results] == ["job-1"]
     assert {job.external_id for job in source_results} == {"job-1", "job-2"}
     assert {job.external_id for job in description_results} == {"job-1", "job-2"}
+
+
+def test_salary_minimum_filter_uses_salary_ceiling_and_annualizes_hourly() -> None:
+    storage = Storage("sqlite+pysqlite:///:memory:")
+    engine = JobMatchEngine(storage=storage)
+    source = engine.save_source(
+        JobSourceConfig(
+            id=None,
+            name="Company Board",
+            source_type="browser_capture",
+            url="https://example.com/jobs",
+            enabled=True,
+        )
+    )
+    storage.upsert_jobs(
+        source,
+        [
+            _sample_job(
+                source,
+                "job-1",
+                "Cloud Engineer",
+                salary_min=95000,
+                salary_max=140000,
+                salary_interval="year",
+                salary_text="$95,000 - $140,000/yr",
+            ),
+            _sample_job(
+                source,
+                "job-2",
+                "Helpdesk Engineer",
+                salary_min=80000,
+                salary_max=110000,
+                salary_interval="year",
+                salary_text="$80,000 - $110,000/yr",
+            ),
+            _sample_job(
+                source,
+                "job-3",
+                "Contract Engineer",
+                salary_min=50,
+                salary_max=85,
+                salary_interval="hour",
+                salary_text="$50 - $85/hr",
+            ),
+            _sample_job(source, "job-4", "Unknown Salary Engineer"),
+        ],
+    )
+
+    minimum_120k = engine.list_filtered_jobs(FilterCriteria(salary_minimum=120000))
+    minimum_150k = engine.list_filtered_jobs(FilterCriteria(salary_minimum=150000))
+
+    assert {job.external_id for job in minimum_120k} == {"job-1", "job-3"}
+    assert {job.external_id for job in minimum_150k} == {"job-3"}
 
 
 def test_mark_job_opened_does_not_override_applied_state() -> None:
