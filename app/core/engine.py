@@ -57,6 +57,26 @@ class JobMatchEngine:
     def get_active_resume(self) -> ResumeProfile | None:
         return self.storage.get_active_resume()
 
+    def list_resumes(self) -> list[ResumeProfile]:
+        return self.storage.list_resumes()
+
+    def set_primary_resume(self, resume_id: int) -> ResumeProfile:
+        return self.storage.set_active_resume(resume_id)
+
+    def reparse_resume(self, resume_id: int) -> ResumeProfile:
+        existing = self.storage.get_resume(resume_id)
+        if existing is None:
+            raise ValueError("Resume not found.")
+        path = Path(existing.file_path)
+        if not path.exists():
+            raise ValueError("The stored resume file is missing. Upload the resume again before reparsing.")
+        parsed = self.resume_parser.parse(path, llm_enricher=self._make_ollama_enricher())
+        parsed.filename = existing.filename
+        parsed.file_path = existing.file_path
+        parsed.file_hash = existing.file_hash
+        parsed.is_active = existing.is_active
+        return self.storage.update_resume(resume_id, parsed)
+
     def get_active_application_profile(self) -> dict[str, object] | None:
         resume = self.storage.get_active_resume()
         return dict(resume.application_profile or {}) if resume else None

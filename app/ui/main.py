@@ -102,6 +102,7 @@ ui.add_css(
     .drawer-brand { font-size: 0.75rem; letter-spacing: 0.16em; text-transform: uppercase; color: var(--app-muted); }
     .drawer-title { font-size: 1.2rem; font-weight: 700; color: var(--app-text); }
     .nav-button { justify-content: flex-start; width: 100%; text-transform: none; border-radius: 12px; padding: 0.35rem 0.5rem; }
+    .nav-button-compact { width: 2.5rem; min-width: 2.5rem; height: 2.5rem; border-radius: 999px; }
     .nav-button-active { background: rgba(15, 118, 110, 0.12); color: var(--app-accent); }
     .content-shell { width: 100%; max-width: none; padding: 1.25rem 1.5rem 1.5rem 1.5rem; gap: 1rem; }
     .page-title { font-size: 1.5rem; font-weight: 700; color: var(--app-text); }
@@ -176,6 +177,8 @@ ui.add_css(
     .chip-row { display: flex; flex-wrap: wrap; gap: 0.45rem; }
     .skill-chip { display: inline-flex; align-items: center; border-radius: 999px; padding: 0.15rem 0.55rem; background: var(--app-surface-2); color: var(--app-text); font-size: 0.8rem; }
     .resume-copy { min-height: 12rem; }
+    .saved-resume-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0.75rem; align-items: center; padding: 0.8rem 0; border-top: 1px solid var(--app-border); }
+    .saved-resume-row:first-of-type { border-top: 0; padding-top: 0.25rem; }
     .sources-grid { display: grid; grid-template-columns: minmax(320px, 0.95fr) minmax(420px, 1.2fr); gap: 1rem; width: 100%; }
     .settings-grid { display: grid; grid-template-columns: repeat(2, minmax(280px, 1fr)); gap: 1rem; width: 100%; }
     .empty-state { border: 1px dashed var(--app-border); border-radius: 16px; padding: 2rem; color: var(--app-muted); }
@@ -294,6 +297,7 @@ async def redirect_to_job(job_id: int) -> RedirectResponse:
 @dataclass(slots=True)
 class UIState:
     current_view: str = "dashboard"
+    sidebar_collapsed: bool = False
     results_mode: str = "matched"
     location_query: str = ""
     remote_mode: str = "any"
@@ -344,6 +348,7 @@ class JobMatchUI:
         self.dark_mode = ui.dark_mode(self._theme_setting_to_value(str(self.engine.get_settings().get("theme_mode", "auto"))))
         self.client = None
         self.content = None
+        self.drawer = None
         self.nav_shell = None
         self.status_label = None
         self.scan_button = None
@@ -365,6 +370,7 @@ class JobMatchUI:
         with ui.header(elevated=False, bordered=False).classes("app-header px-4 py-2 items-center"):
             with ui.row().classes("w-full items-center justify-between"):
                 with ui.row().classes("items-center gap-4"):
+                    ui.button(icon="menu", on_click=self.toggle_sidebar).props("flat round dense color=white")
                     with ui.column().classes("gap-0"):
                         ui.label(APP_NAME).classes("text-white text-lg font-bold")
                         ui.label("Local resume-to-job matcher").classes("text-slate-300 text-xs tracking-wide uppercase")
@@ -372,7 +378,8 @@ class JobMatchUI:
                 with ui.row().classes("items-center gap-3"):
                     ui.label("Browser capture ready").classes("text-slate-300 text-sm")
 
-        with ui.left_drawer(value=True, bordered=False, elevated=False).props("width=208").classes("app-drawer"):
+        self.drawer = ui.left_drawer(value=True, bordered=False, elevated=False).props(f"width={self._sidebar_width()}").classes("app-drawer")
+        with self.drawer:
             self.nav_shell = ui.column().classes("w-full gap-3 p-3")
             self.render_sidebar()
 
@@ -524,10 +531,22 @@ class JobMatchUI:
     def render_sidebar(self) -> None:
         if self._client_deleted or self.nav_shell is None:
             return
+        self._apply_sidebar_width()
         self.nav_shell.clear()
+        collapsed = self.state.sidebar_collapsed
         with self.nav_shell:
-            ui.label("Workspace").classes("drawer-brand")
-            ui.label(APP_NAME).classes("drawer-title mb-2")
+            if collapsed:
+                toggle = ui.button(icon="keyboard_double_arrow_right", on_click=self.toggle_sidebar)
+                toggle.props("flat round dense")
+                toggle.classes("nav-button-compact")
+                with toggle:
+                    ui.tooltip("Expand sidebar")
+            else:
+                with ui.row().classes("w-full items-center justify-between"):
+                    with ui.column().classes("gap-0"):
+                        ui.label("Workspace").classes("drawer-brand")
+                        ui.label(APP_NAME).classes("drawer-title mb-2")
+                    ui.button(icon="keyboard_double_arrow_left", on_click=self.toggle_sidebar).props("flat round dense")
             items = [
                 ("dashboard", "Dashboard", "table_view"),
                 ("scans", "Scans", "sync"),
@@ -536,8 +555,27 @@ class JobMatchUI:
                 ("settings", "Settings", "tune"),
             ]
             for key, label, icon in items:
+                if collapsed:
+                    classes = "nav-button-compact nav-button-active" if self.state.current_view == key else "nav-button-compact"
+                    button = ui.button(icon=icon, on_click=lambda _, target=key: self.set_view(target))
+                    button.props("flat round dense")
+                    button.classes(classes)
+                    with button:
+                        ui.tooltip(label)
+                    continue
                 classes = "nav-button nav-button-active" if self.state.current_view == key else "nav-button"
                 ui.button(label, icon=icon, on_click=lambda _, target=key: self.set_view(target)).props("flat no-caps align=left").classes(classes)
+
+    def toggle_sidebar(self) -> None:
+        self.state.sidebar_collapsed = not self.state.sidebar_collapsed
+        self.render_sidebar()
+
+    def _sidebar_width(self) -> int:
+        return 72 if self.state.sidebar_collapsed else 208
+
+    def _apply_sidebar_width(self) -> None:
+        if self.drawer is not None:
+            self.drawer.props(f"width={self._sidebar_width()}")
 
     def set_view(self, view: str) -> None:
         self.state.current_view = view
@@ -621,7 +659,11 @@ class JobMatchUI:
 
             with ui.element("section").classes("panel panel-tight"):
                 with ui.element("div").classes("toolbar-grid"):
-                    ui.input("Location", value=self.state.location_query, on_change=lambda e: setattr(self.state, "location_query", e.value)).props("outlined dense")
+                    ui.input(
+                        "Search",
+                        value=self.state.location_query,
+                        on_change=lambda e: setattr(self.state, "location_query", e.value),
+                    ).props("outlined dense clearable placeholder='Title, company, skill, description...'")
                     ui.select(REMOTE_MODES, value=self.state.remote_mode, label="Remote", on_change=lambda e: setattr(self.state, "remote_mode", e.value)).props("outlined dense")
                     ui.select(JOB_TYPES, value=self.state.job_type, label="Job type", on_change=lambda e: setattr(self.state, "job_type", e.value)).props("outlined dense")
                     ui.select(
@@ -896,6 +938,7 @@ class JobMatchUI:
 
     def render_resume(self) -> None:
         resume = self.engine.get_active_resume()
+        saved_resumes = self.engine.list_resumes()
         self._ensure_resume_form(resume)
         with ui.column().classes("w-full gap-4"):
             with ui.row().classes("w-full items-end justify-between"):
@@ -931,13 +974,55 @@ class JobMatchUI:
                         if basics.get("email"):
                             metric_line.append(str(basics.get("email")))
                         if metric_line:
-                            ui.label(" • ".join(metric_line)).classes("muted-copy")
+                            ui.label(" | ".join(metric_line)).classes("muted-copy")
                         with ui.element("div").classes("chip-row mt-3"):
                             ui.html(f'<span class="skill-chip">{len(self.state.resume_form.get("work_history", []))} jobs</span>', sanitize=False)
                             ui.html(f'<span class="skill-chip">{len(self.state.resume_form.get("education", []))} education entries</span>', sanitize=False)
                             ui.html(f'<span class="skill-chip">{len(self.state.resume_form.get("skills", []))} skills</span>', sanitize=False)
                             if resume.clearance_terms:
                                 ui.html(f'<span class="skill-chip">{", ".join(resume.clearance_terms[:2])}</span>', sanitize=False)
+
+            with ui.element("section").classes("panel"):
+                with ui.row().classes("w-full items-center justify-between"):
+                    with ui.column().classes("gap-1"):
+                        ui.label("Saved resumes").classes("text-lg font-semibold")
+                        ui.label("Only the primary resume is used for matching. Other saved resumes are kept for future applying and comparison workflows.").classes("page-subtitle")
+                    if resume and resume.id is not None:
+                        ui.button(
+                            "Reparse primary",
+                            icon="auto_fix_high",
+                            on_click=lambda _, resume_id=resume.id: asyncio.create_task(self.handle_reparse_resume(resume_id)),
+                        ).props("flat")
+                if not saved_resumes:
+                    self._empty_state("No saved resumes yet.")
+                else:
+                    for saved in saved_resumes:
+                        profile = dict(saved.application_profile or {})
+                        work_count = len([item for item in (profile.get("work_history") or []) if isinstance(item, dict)])
+                        education_count = len([item for item in (profile.get("education") or []) if isinstance(item, dict)])
+                        updated_text = self._format_datetime(saved.updated_at)
+                        with ui.element("div").classes("saved-resume-row"):
+                            with ui.column().classes("gap-1"):
+                                with ui.row().classes("items-center gap-2"):
+                                    ui.label(saved.filename).classes("font-semibold")
+                                    if saved.is_active:
+                                        ui.html('<span class="application-chip application-chip-applied">Primary</span>', sanitize=False)
+                                ui.label(
+                                    f"Updated {updated_text} | {work_count} jobs | {education_count} education entries | {len(saved.skills)} skills"
+                                ).classes("muted-copy")
+                            with ui.row().classes("items-center gap-2"):
+                                if not saved.is_active and saved.id is not None:
+                                    ui.button(
+                                        "Make primary",
+                                        icon="check_circle",
+                                        on_click=lambda _, resume_id=saved.id: asyncio.create_task(self.handle_make_primary_resume(resume_id)),
+                                    ).props("flat no-caps")
+                                if saved.id is not None:
+                                    ui.button(
+                                        "Reparse",
+                                        icon="auto_fix_high",
+                                        on_click=lambda _, resume_id=saved.id: asyncio.create_task(self.handle_reparse_resume(resume_id)),
+                                    ).props("flat no-caps")
 
             if not resume:
                 return
@@ -1122,6 +1207,43 @@ class JobMatchUI:
                 self.render_current_view()
         except Exception as exc:
             self._notify(f"Could not save resume profile: {exc}", type="negative")
+
+    async def handle_make_primary_resume(self, resume_id: int) -> None:
+        if self._client_deleted:
+            return
+        self.status_label.set_text("Switching primary resume...")
+        try:
+            resume = await asyncio.to_thread(self.engine.set_primary_resume, resume_id)
+            self.state.resume_form_resume_id = None
+            self._append_activity(f"Primary resume set to {resume.filename}.")
+            self._notify("Primary resume updated.", type="positive")
+            await self.refresh_matches(record_activity=True)
+        except Exception as exc:
+            self._append_activity(f"Primary resume switch failed: {exc}")
+            self._notify(f"Could not switch primary resume: {exc}", type="negative")
+            self.render_current_view()
+        finally:
+            self.status_label.set_text(self.state.scan_status if self.state.scan_running else "Ready")
+
+    async def handle_reparse_resume(self, resume_id: int) -> None:
+        if self._client_deleted:
+            return
+        self.status_label.set_text("Reparsing resume...")
+        try:
+            resume = await asyncio.to_thread(self.engine.reparse_resume, resume_id)
+            self.state.resume_form_resume_id = None
+            self._append_activity(f"Reparsed resume profile for {resume.filename}.")
+            self._notify("Resume profile reparsed.", type="positive")
+            if resume.is_active:
+                await self.refresh_matches(record_activity=True)
+            else:
+                self.render_current_view()
+        except Exception as exc:
+            self._append_activity(f"Resume reparse failed: {exc}")
+            self._notify(f"Could not reparse resume: {exc}", type="negative")
+            self.render_current_view()
+        finally:
+            self.status_label.set_text(self.state.scan_status if self.state.scan_running else "Ready")
 
     def render_settings(self) -> None:
         settings = self.engine.get_settings()
@@ -2200,7 +2322,9 @@ class JobMatchUI:
                     <div class="detail-copy">Type: {{ props.row.job_type || 'unspecified' }}</div>
                     <div class="detail-copy">Salary: {{ props.row.salary_text || 'Not provided' }}</div>
                     <div class="detail-copy">Clearance: {{ props.row.clearance }}</div>
-                    <div class="detail-copy">Posted: {{ props.row.posted_at }}</div>
+                    <div class="detail-copy">Original posted: {{ props.row.posted_at }}</div>
+                    <div class="detail-copy">Captured: {{ props.row.first_seen_at }}</div>
+                    <div class="detail-copy">Last seen: {{ props.row.last_seen_at }}</div>
                     <div style="margin-top: 0.75rem;">
                       <q-btn
                         color="primary"
@@ -2252,7 +2376,9 @@ class JobMatchUI:
             "analysis_title": "Why It Scored This Way",
             "reasons_text": reasons_text,
             "clearance": clearance,
-            "posted_at": match.job.posted_at.strftime("%Y-%m-%d") if match.job.posted_at else "Unknown",
+            "posted_at": JobMatchUI._format_datetime(match.job.posted_at),
+            "first_seen_at": JobMatchUI._format_datetime(match.job.first_seen_at),
+            "last_seen_at": JobMatchUI._format_datetime(match.job.last_seen_at),
             "url": match.job.url,
             "open_url": f"/jobs/open/{match.job_id}",
             "source_name": match.job.source_name,
@@ -2283,7 +2409,9 @@ class JobMatchUI:
             "analysis_title": "Rank Status",
             "reasons_text": secondary_label,
             "clearance": clearance,
-            "posted_at": job.posted_at.strftime("%Y-%m-%d") if job.posted_at else "Unknown",
+            "posted_at": JobMatchUI._format_datetime(job.posted_at),
+            "first_seen_at": JobMatchUI._format_datetime(job.first_seen_at),
+            "last_seen_at": JobMatchUI._format_datetime(job.last_seen_at),
             "url": job.url,
             "open_url": f"/jobs/open/{job.id}" if job.id is not None else job.url,
             "source_name": job.source_name,
@@ -2340,6 +2468,16 @@ class JobMatchUI:
         if normalized in {"", "any", "unknown", "onsite"}:
             return ""
         return normalized
+
+    @staticmethod
+    def _format_datetime(value: datetime | None) -> str:
+        if value is None:
+            return "Unknown"
+        try:
+            value = value.astimezone()
+        except ValueError:
+            pass
+        return value.strftime("%Y-%m-%d %H:%M")
 
     @staticmethod
     def _stat_block(label: str, value: str) -> None:

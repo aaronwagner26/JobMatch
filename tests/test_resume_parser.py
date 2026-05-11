@@ -173,3 +173,87 @@ def test_engine_can_update_active_resume_profile(tmp_path: Path) -> None:
     assert "PowerShell" in updated.skills
     assert "Secret" in updated.clearance_terms
     assert "Senior Infrastructure Engineer" in updated.summary_text
+
+
+def test_engine_tracks_saved_resumes_and_primary_selection(tmp_path: Path) -> None:
+    storage = Storage("sqlite+pysqlite:///:memory:")
+    engine = JobMatchEngine(storage=storage)
+    first_path = tmp_path / "first-resume.txt"
+    first_path.write_text(
+        "\n".join(
+            [
+                "Jane Doe",
+                "SUMMARY",
+                "Systems administrator supporting Windows and Azure.",
+                "EXPERIENCE",
+                "Systems Administrator | Example Corp | Jan 2018 - Present",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    second_path = tmp_path / "second-resume.txt"
+    second_path.write_text(
+        "\n".join(
+            [
+                "Jane Doe",
+                "SUMMARY",
+                "Cloud engineer supporting AWS and Linux.",
+                "EXPERIENCE",
+                "Cloud Engineer | Example Cloud | Jan 2020 - Present",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    first = engine.save_resume(first_path)
+    second = engine.save_resume(second_path)
+
+    resumes = engine.list_resumes()
+    assert len(resumes) == 2
+    assert engine.get_active_resume().id == second.id
+    assert sum(1 for resume in resumes if resume.is_active) == 1
+
+    primary = engine.set_primary_resume(first.id or 0)
+
+    assert primary.id == first.id
+    assert primary.is_active is True
+    assert engine.get_active_resume().id == first.id
+
+
+def test_engine_can_reparse_saved_resume_profile(tmp_path: Path) -> None:
+    storage = Storage("sqlite+pysqlite:///:memory:")
+    engine = JobMatchEngine(storage=storage)
+    resume_path = tmp_path / "resume.txt"
+    resume_path.write_text(
+        "\n".join(
+            [
+                "Jane Doe",
+                "SUMMARY",
+                "Systems administrator supporting Windows.",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    stored = engine.save_resume(resume_path)
+    Path(stored.file_path).write_text(
+        "\n".join(
+            [
+                "Jane Doe",
+                "SUMMARY",
+                "Systems administrator supporting Windows.",
+                "EXPERIENCE",
+                "Senior Systems Administrator | Example Corp | Jan 2021 - Present",
+                "- Led Azure and Intune modernization.",
+                "EDUCATION",
+                "Bachelor of Science in Information Technology",
+                "State University",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    reparsed = engine.reparse_resume(stored.id or 0)
+
+    assert reparsed.is_active is True
+    assert reparsed.application_profile["work_history"]
+    assert reparsed.application_profile["education"]

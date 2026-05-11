@@ -87,6 +87,35 @@ def test_application_state_tracking_and_filters() -> None:
     assert pending_after_resolution == []
 
 
+def test_search_filter_checks_title_company_source_and_description() -> None:
+    storage = Storage("sqlite+pysqlite:///:memory:")
+    engine = JobMatchEngine(storage=storage)
+    source = engine.save_source(
+        JobSourceConfig(
+            id=None,
+            name="Security Capture",
+            source_type="browser_capture",
+            url="https://example.com/jobs",
+            enabled=True,
+        )
+    )
+    storage.upsert_jobs(
+        source,
+        [
+            _sample_job(source, "job-1", "Platform Engineer"),
+            _sample_job(source, "job-2", "Cloud Engineer"),
+        ],
+    )
+
+    title_results = engine.list_filtered_jobs(FilterCriteria(location_query="platform"))
+    source_results = engine.list_filtered_jobs(FilterCriteria(location_query="security capture"))
+    description_results = engine.list_filtered_jobs(FilterCriteria(location_query="python"))
+
+    assert [job.external_id for job in title_results] == ["job-1"]
+    assert {job.external_id for job in source_results} == {"job-1", "job-2"}
+    assert {job.external_id for job in description_results} == {"job-1", "job-2"}
+
+
 def test_mark_job_opened_does_not_override_applied_state() -> None:
     storage = Storage("sqlite+pysqlite:///:memory:")
     engine = JobMatchEngine(storage=storage)

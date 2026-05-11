@@ -74,25 +74,12 @@ class Storage:
     def save_resume(self, resume: ResumeProfile) -> ResumeProfile:
         with self.session() as session:
             session.query(ResumeRecord).update({ResumeRecord.is_active: False})
-            record = ResumeRecord(
-                filename=resume.filename,
-                file_path=resume.file_path,
-                file_hash=resume.file_hash,
-                raw_text=resume.raw_text,
-                summary_text=resume.summary_text,
-                skills=resume.skills,
-                tools=resume.tools,
-                certifications=resume.certifications,
-                clearance_terms=resume.clearance_terms,
-                recent_titles=resume.recent_titles,
-                experience_years=resume.experience_years,
-                experience_spans=resume.experience_spans,
-                sections=resume.sections,
-                application_profile=resume.application_profile,
-                embedding=resume.embedding,
-                is_active=True,
-            )
-            session.add(record)
+            record = session.scalar(select(ResumeRecord).where(ResumeRecord.file_hash == resume.file_hash))
+            if record is None:
+                record = ResumeRecord(is_active=True)
+                session.add(record)
+            self._apply_resume_to_record(record, resume)
+            record.is_active = True
             session.flush()
             return self._resume_from_record(record)
 
@@ -101,21 +88,16 @@ class Storage:
             record = session.scalar(select(ResumeRecord).where(ResumeRecord.is_active.is_(True)).order_by(ResumeRecord.updated_at.desc()))
             if record is None:
                 raise ValueError("No active resume is available to update.")
-            record.filename = resume.filename
-            record.file_path = resume.file_path
-            record.file_hash = resume.file_hash
-            record.raw_text = resume.raw_text
-            record.summary_text = resume.summary_text
-            record.skills = resume.skills
-            record.tools = resume.tools
-            record.certifications = resume.certifications
-            record.clearance_terms = resume.clearance_terms
-            record.recent_titles = resume.recent_titles
-            record.experience_years = resume.experience_years
-            record.experience_spans = resume.experience_spans
-            record.sections = resume.sections
-            record.application_profile = resume.application_profile
-            record.embedding = resume.embedding
+            self._apply_resume_to_record(record, resume)
+            session.flush()
+            return self._resume_from_record(record)
+
+    def update_resume(self, resume_id: int, resume: ResumeProfile) -> ResumeProfile:
+        with self.session() as session:
+            record = session.get(ResumeRecord, resume_id)
+            if record is None:
+                raise ValueError("Resume not found.")
+            self._apply_resume_to_record(record, resume)
             session.flush()
             return self._resume_from_record(record)
 
@@ -124,10 +106,26 @@ class Storage:
             record = session.scalar(select(ResumeRecord).where(ResumeRecord.is_active.is_(True)).order_by(ResumeRecord.updated_at.desc()))
             return self._resume_from_record(record) if record else None
 
+    def get_resume(self, resume_id: int) -> ResumeProfile | None:
+        with self.session() as session:
+            record = session.get(ResumeRecord, resume_id)
+            return self._resume_from_record(record) if record else None
+
     def list_resumes(self) -> list[ResumeProfile]:
         with self.session() as session:
             records = session.scalars(select(ResumeRecord).order_by(ResumeRecord.updated_at.desc())).all()
             return [self._resume_from_record(record) for record in records]
+
+    def set_active_resume(self, resume_id: int) -> ResumeProfile:
+        with self.session() as session:
+            record = session.get(ResumeRecord, resume_id)
+            if record is None:
+                raise ValueError("Resume not found.")
+            session.query(ResumeRecord).update({ResumeRecord.is_active: False})
+            record.is_active = True
+            record.embedding = None
+            session.flush()
+            return self._resume_from_record(record)
 
     def save_resume_embedding(self, resume_id: int, embedding: list[float]) -> None:
         with self.session() as session:
@@ -619,7 +617,26 @@ class Storage:
             embedding=list(record.embedding) if record.embedding else None,
             created_at=record.created_at,
             updated_at=record.updated_at,
+            is_active=bool(record.is_active),
         )
+
+    @staticmethod
+    def _apply_resume_to_record(record: ResumeRecord, resume: ResumeProfile) -> None:
+        record.filename = resume.filename
+        record.file_path = resume.file_path
+        record.file_hash = resume.file_hash
+        record.raw_text = resume.raw_text
+        record.summary_text = resume.summary_text
+        record.skills = resume.skills
+        record.tools = resume.tools
+        record.certifications = resume.certifications
+        record.clearance_terms = resume.clearance_terms
+        record.recent_titles = resume.recent_titles
+        record.experience_years = resume.experience_years
+        record.experience_spans = resume.experience_spans
+        record.sections = resume.sections
+        record.application_profile = resume.application_profile
+        record.embedding = resume.embedding
 
     @staticmethod
     def _source_from_record(record: SourceRecord) -> JobSourceConfig:

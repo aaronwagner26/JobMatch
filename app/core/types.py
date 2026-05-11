@@ -25,6 +25,7 @@ class ResumeProfile:
     embedding: list[float] | None = None
     created_at: datetime | None = None
     updated_at: datetime | None = None
+    is_active: bool = False
 
 
 @dataclass(slots=True)

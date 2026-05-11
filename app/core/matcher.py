@@ -92,7 +92,27 @@ class JobMatcher:
         if filters.source_ids and job.source_id not in filters.source_ids:
             return False
         if filters.location_query:
-            if filters.location_query.casefold() not in f"{job.location} {job.description}".casefold():
+            query = filters.location_query.casefold().strip()
+            searchable = " ".join(
+                [
+                    job.title or "",
+                    job.company or "",
+                    job.location or "",
+                    job.source_name or "",
+                    job.remote_mode or "",
+                    job.job_type or "",
+                    job.salary_text or "",
+                    job.employment_text or "",
+                    job.summary_text or "",
+                    job.description or "",
+                    " ".join(job.skills or []),
+                    " ".join(job.required_skills or []),
+                    " ".join(job.preferred_skills or []),
+                    " ".join(job.clearance_terms or []),
+                ]
+            ).casefold()
+            terms = [term for term in query.split() if term]
+            if terms and not all(term in searchable for term in terms):
                 return False
         if filters.remote_mode != "any" and job.remote_mode != filters.remote_mode:
             return False
