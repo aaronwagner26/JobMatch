@@ -57,6 +57,28 @@ TITLE_KEYWORDS = {
 }
 COMPANY_HINTS = {"inc", "llc", "corp", "corporation", "ltd", "university", "systems", "solutions", "company"}
 SCHOOL_HINTS = {"university", "college", "institute", "school", "academy"}
+ACTION_VERBS = {
+    "administered",
+    "architected",
+    "built",
+    "configured",
+    "created",
+    "deployed",
+    "developed",
+    "implemented",
+    "improved",
+    "led",
+    "maintained",
+    "managed",
+    "migrated",
+    "monitored",
+    "owned",
+    "performed",
+    "provided",
+    "resolved",
+    "supported",
+    "troubleshot",
+}
 STATE_CODES = {
     "AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "FL", "GA", "HI", "IA", "ID", "IL", "IN", "KS",
     "KY", "LA", "MA", "MD", "ME", "MI", "MN", "MO", "MS", "MT", "NC", "ND", "NE", "NH", "NJ", "NM",
@@ -69,6 +91,10 @@ URL_RE = re.compile(r"(https?://[^\s]+|www\.[^\s]+)", re.IGNORECASE)
 LINKEDIN_RE = re.compile(r"(https?://(?:www\.)?linkedin\.com/[^\s]+|linkedin\.com/[^\s]+)", re.IGNORECASE)
 DEGREE_KEYWORDS = ("bachelor", "master", "associate", "phd", "doctor", "certificate", "certification", "b.s", "b.a", "m.s", "m.a")
 BULLET_PREFIXES = ("-", "*", "\u2022")
+CERT_EXPIRATION_RE = re.compile(
+    rf"\b(?:exp(?:ires|iration)?|valid\s+(?:through|until)|through|until)\s*:?\s*(?P<date>(?:{MONTH_PATTERN}\s+)?\d{{4}}|\d{{1,2}}\/\d{{4}}|\d{{1,2}}\/\d{{1,2}}\/\d{{2,4}})",
+    flags=re.IGNORECASE,
+)
 
 
 class ResumeParser:
@@ -367,6 +393,10 @@ class ResumeParser:
         basics = self._extract_basics(lines, sections, recent_titles, experience_years)
         work_history = self._extract_work_history(sections.get("experience", ""), experience_spans)
         education = self._extract_education(sections.get("education", ""))
+        certification_entries = self._extract_certification_entries(
+            "\n".join([sections.get("certifications", ""), sections.get("education", ""), "\n".join(lines)]),
+            certifications,
+        )
         return {
             "basics": basics,
             "work_history": work_history,
@@ -374,6 +404,7 @@ class ResumeParser:
             "skills": list(skills),
             "tools": list(tools),
             "certifications": list(certifications),
+            "certification_entries": certification_entries,
             "clearance_terms": list(clearance_terms),
             "recent_titles": list(recent_titles),
             "experience_years": float(experience_years or 0.0),
@@ -461,15 +492,28 @@ class ResumeParser:
                 continue
             if self._is_bullet_line(line):
                 if current:
-                    self._append_work_description(current, line.lstrip("-*\u2022 ").strip())
+                    if heading_buffer:
+                        self._flush_heading_buffer_to_description(current, heading_buffer)
+                        heading_buffer = []
+                    self._append_work_description(current, f"- {line.lstrip('-*\u2022 ').strip()}")
                 continue
             if current is None:
-                if self._match_section_header(line) is None:
+                if self._match_section_header(line) is None and not self._is_contact_line(line):
                     heading_buffer.append(line)
+                continue
+            if self._is_contact_line(line):
                 continue
             if self._apply_work_detail_line(current, line):
                 continue
+            if self._is_heading_candidate(line):
+                heading_buffer.append(line)
+                continue
+            if heading_buffer:
+                self._flush_heading_buffer_to_description(current, heading_buffer)
+                heading_buffer = []
             self._append_work_description(current, line)
+        if current and heading_buffer:
+            self._flush_heading_buffer_to_description(current, heading_buffer)
         if current:
             entries.append(current)
 
@@ -518,6 +562,10 @@ class ResumeParser:
             date_match = DATE_RANGE_RE.search(line)
             looks_like_degree = any(keyword in line.casefold() for keyword in DEGREE_KEYWORDS)
             looks_like_school = self._looks_like_school(line)
+            if date_match and current and not looks_like_degree and not looks_like_school:
+                current["start_date"] = current.get("start_date") or self._date_text_to_iso(date_match.group("start"))
+                current["end_date"] = current.get("end_date") or self._date_text_to_iso(date_match.group("end"), default_present=True)
+                continue
             if looks_like_degree or (date_match and (looks_like_school or current is None)):
                 parsed = self._parse_education_line(line)
                 if current and current.get("school") and not current.get("degree") and looks_like_degree:
@@ -570,7 +618,7 @@ class ResumeParser:
         parts: list[str] = []
         for line in lines:
             cleaned = normalize_whitespace(DATE_RANGE_RE.sub("", line).strip(" -|,"))
-            if not cleaned or self._is_bullet_line(cleaned):
+            if not cleaned or self._is_bullet_line(cleaned) or self._is_contact_line(cleaned):
                 continue
             parts.extend(self._split_heading_parts(cleaned))
 
@@ -639,6 +687,8 @@ class ResumeParser:
         return [text]
 
     def _apply_work_detail_line(self, current: dict[str, object], line: str) -> bool:
+        if self._is_contact_line(line) or self._is_bullet_line(line):
+            return False
         if not current.get("location") and self._looks_like_location(line):
             current["location"] = line
             return True
@@ -659,7 +709,21 @@ class ResumeParser:
 
     @staticmethod
     def _append_work_description(current: dict[str, object], value: str) -> None:
-        current["description"] = normalize_whitespace(f"{current.get('description', '')}\n{value}".strip())
+        current["description"] = ResumeParser._append_multiline(str(current.get("description") or ""), value)
+
+    @staticmethod
+    def _append_multiline(existing: str, value: str) -> str:
+        next_line = normalize_whitespace(value)
+        if not next_line:
+            return existing
+        if not existing:
+            return next_line
+        return f"{existing.rstrip()}\n{next_line}"
+
+    @staticmethod
+    def _flush_heading_buffer_to_description(current: dict[str, object], lines: list[str]) -> None:
+        for line in lines:
+            ResumeParser._append_work_description(current, line)
 
     @staticmethod
     def _is_bullet_line(line: str) -> bool:
@@ -667,18 +731,36 @@ class ResumeParser:
 
     @staticmethod
     def _looks_like_title(value: str) -> bool:
+        if ResumeParser._is_contact_line(value) or ResumeParser._is_bullet_line(value) or ResumeParser._starts_with_action_verb(value):
+            return False
         lowered = value.casefold()
         return any(keyword in lowered for keyword in TITLE_KEYWORDS)
 
     @staticmethod
     def _looks_like_company(value: str) -> bool:
+        if (
+            ResumeParser._is_contact_line(value)
+            or ResumeParser._is_bullet_line(value)
+            or ResumeParser._starts_with_action_verb(value)
+            or value.rstrip().endswith((".", ";", ":"))
+        ):
+            return False
         lowered = value.casefold()
         if any(hint in lowered for hint in COMPANY_HINTS):
             return True
-        return len(value) <= 80 and not ResumeParser._looks_like_title(value) and not ResumeParser._looks_like_location(value)
+        words = [word for word in re.split(r"\s+", value.strip()) if word]
+        title_like_words = sum(1 for word in words if word[:1].isupper() or word.isupper())
+        return (
+            1 <= len(words) <= 5
+            and title_like_words >= max(1, len(words) - 1)
+            and not ResumeParser._looks_like_title(value)
+            and not ResumeParser._looks_like_location(value)
+        )
 
     @staticmethod
     def _looks_like_location(value: str) -> bool:
+        if ResumeParser._is_contact_line(value) or ResumeParser._is_bullet_line(value):
+            return False
         text = normalize_whitespace(value)
         if not text or len(text) > 90:
             return False
@@ -695,12 +777,70 @@ class ResumeParser:
 
     @staticmethod
     def _looks_like_school(value: str) -> bool:
+        if ResumeParser._is_contact_line(value) or ResumeParser._is_bullet_line(value):
+            return False
         lowered = value.casefold()
         return any(hint in lowered for hint in SCHOOL_HINTS)
 
     @staticmethod
     def _is_certification_only_line(line: str) -> bool:
         return bool(extract_certifications(line)) and not ResumeParser._looks_like_school(line)
+
+    @staticmethod
+    def _is_contact_line(line: str) -> bool:
+        return bool(EMAIL_RE.search(line) or PHONE_RE.search(line) or URL_RE.search(line))
+
+    @staticmethod
+    def _starts_with_action_verb(value: str) -> bool:
+        first_word = re.sub(r"[^a-z]", "", normalize_whitespace(value).split(" ", 1)[0].casefold())
+        return first_word in ACTION_VERBS
+
+    @staticmethod
+    def _is_heading_candidate(line: str) -> bool:
+        text = normalize_whitespace(line)
+        if not text or len(text) > 100 or ResumeParser._is_contact_line(text) or ResumeParser._is_bullet_line(text):
+            return False
+        return (
+            ResumeParser._looks_like_title(text)
+            or ResumeParser._looks_like_company(text)
+            or ResumeParser._looks_like_location(text)
+            or " at " in text.casefold()
+            or "|" in text
+        )
+
+    def _extract_certification_entries(self, source_text: str, certifications: list[str]) -> list[dict[str, str]]:
+        entries_by_name: dict[str, dict[str, str]] = {}
+        for line in [normalize_whitespace(value) for value in source_text.splitlines() if normalize_whitespace(value)]:
+            line_certs = extract_certifications(line)
+            if not line_certs:
+                continue
+            expiration = self._extract_cert_expiration(line)
+            for cert in line_certs:
+                current = entries_by_name.get(cert.casefold())
+                if current is None:
+                    entries_by_name[cert.casefold()] = {
+                        "name": cert,
+                        "expiration_date": expiration,
+                        "raw_text": line,
+                    }
+                elif expiration and not current.get("expiration_date"):
+                    current["expiration_date"] = expiration
+        for cert in certifications:
+            entries_by_name.setdefault(
+                cert.casefold(),
+                {
+                    "name": cert,
+                    "expiration_date": "",
+                    "raw_text": "",
+                },
+            )
+        return list(entries_by_name.values())
+
+    def _extract_cert_expiration(self, line: str) -> str:
+        match = CERT_EXPIRATION_RE.search(line)
+        if not match:
+            return ""
+        return self._date_text_to_iso(match.group("date"))
 
     def _parse_education_line(self, line: str) -> dict[str, object]:
         date_match = DATE_RANGE_RE.search(line)

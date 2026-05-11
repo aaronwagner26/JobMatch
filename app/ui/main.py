@@ -971,7 +971,7 @@ class JobMatchUI:
                             with ui.element("div").classes("chip-row mt-2"):
                                 ui.html(f'<span class="skill-chip">{len(self.state.resume_form.get("work_history", []))} jobs</span>', sanitize=False)
                                 ui.html(f'<span class="skill-chip">{len(self.state.resume_form.get("education", []))} education</span>', sanitize=False)
-                                ui.html(f'<span class="skill-chip">{len(self.state.resume_form.get("certifications", []))} certs</span>', sanitize=False)
+                                ui.html(f'<span class="skill-chip">{len(self.state.resume_form.get("certification_entries", []))} certs</span>', sanitize=False)
                                 ui.html(f'<span class="skill-chip">{len(self.state.resume_form.get("skills", []))} skills</span>', sanitize=False)
                     with ui.column().classes("gap-2"):
                         ui.upload(
@@ -1087,7 +1087,22 @@ class JobMatchUI:
                     ui.textarea("Tools and platforms", value=", ".join(self.state.resume_form.get("tools", [])), on_change=lambda e: self._update_resume_list("tools", e.value)).props("outlined autogrow").classes("w-full mt-3")
                 with ui.element("section").classes("panel"):
                     ui.label("Credentials").classes("text-lg font-semibold")
-                    ui.textarea("Certifications", value=", ".join(self.state.resume_form.get("certifications", [])), on_change=lambda e: self._update_resume_list("certifications", e.value)).props("outlined autogrow").classes("w-full mt-3")
+                    with ui.row().classes("w-full items-center justify-between mt-2"):
+                        ui.label("Certifications").classes("section-label")
+                        ui.button("Add certification", icon="add", on_click=self.add_resume_certification).props("flat dense no-caps")
+                    certification_entries = self.state.resume_form.get("certification_entries", [])
+                    if not certification_entries:
+                        ui.label("No certifications parsed yet. Add one or reparse the primary resume.").classes("muted-copy mt-2")
+                    for index, item in enumerate(certification_entries):
+                        with ui.element("div").classes("panel-tight mt-3").style("border: 1px solid var(--app-border); border-radius: 14px;"):
+                            with ui.row().classes("w-full items-center justify-between"):
+                                ui.label(f"Certification {index + 1}").classes("section-label")
+                                ui.button(icon="delete", on_click=lambda idx=index: self.remove_resume_certification(idx)).props("flat round dense color=negative")
+                            with ui.grid(columns=2).classes("w-full gap-3 mt-2"):
+                                ui.input("Name", value=item.get("name", ""), on_change=lambda e, idx=index: self._update_resume_certification(idx, "name", e.value)).props("outlined dense").classes("w-full")
+                                ui.input("Expiration", value=item.get("expiration_date", ""), on_change=lambda e, idx=index: self._update_resume_certification(idx, "expiration_date", e.value)).props("outlined dense").classes("w-full")
+                            if item.get("raw_text"):
+                                ui.label(str(item.get("raw_text"))).classes("muted-copy text-sm mt-2")
                     ui.textarea("Clearance", value=", ".join(self.state.resume_form.get("clearance_terms", [])), on_change=lambda e: self._update_resume_list("clearance_terms", e.value)).props("outlined autogrow").classes("w-full mt-3")
 
             with ui.element("section").classes("panel"):
@@ -1126,9 +1141,25 @@ class JobMatchUI:
             "skills": list(profile.get("skills") or resume.skills),
             "tools": list(profile.get("tools") or resume.tools),
             "certifications": list(profile.get("certifications") or resume.certifications),
+            "certification_entries": JobMatchUI._certification_entries_from_profile(profile, resume),
             "clearance_terms": list(profile.get("clearance_terms") or resume.clearance_terms),
             "experience_years": float(profile.get("experience_years") or resume.experience_years or 0.0),
         }
+
+    @staticmethod
+    def _certification_entries_from_profile(profile: dict[str, Any], resume: ResumeProfile) -> list[dict[str, str]]:
+        entries = [dict(item) for item in (profile.get("certification_entries") or []) if isinstance(item, dict)]
+        if entries:
+            return [
+                {
+                    "name": str(item.get("name") or ""),
+                    "expiration_date": str(item.get("expiration_date") or ""),
+                    "raw_text": str(item.get("raw_text") or ""),
+                }
+                for item in entries
+                if str(item.get("name") or "").strip()
+            ]
+        return [{"name": cert, "expiration_date": "", "raw_text": ""} for cert in (profile.get("certifications") or resume.certifications)]
 
     def _update_resume_basic(self, key: str, value: Any) -> None:
         basics = self.state.resume_form.setdefault("basics", {})
@@ -1149,6 +1180,12 @@ class JobMatchUI:
         education = self.state.resume_form.setdefault("education", [])
         if 0 <= index < len(education):
             education[index][key] = value
+
+    def _update_resume_certification(self, index: int, key: str, value: Any) -> None:
+        certifications = self.state.resume_form.setdefault("certification_entries", [])
+        if 0 <= index < len(certifications):
+            certifications[index][key] = value
+            self._sync_resume_certification_names()
 
     def add_resume_work_history(self) -> None:
         self.state.resume_form.setdefault("work_history", []).append(
@@ -1192,6 +1229,31 @@ class JobMatchUI:
             education.pop(index)
         if self.state.current_view == "resume":
             self.render_current_view()
+
+    def add_resume_certification(self) -> None:
+        self.state.resume_form.setdefault("certification_entries", []).append(
+            {
+                "name": "",
+                "expiration_date": "",
+                "raw_text": "",
+            }
+        )
+        self._sync_resume_certification_names()
+        if self.state.current_view == "resume":
+            self.render_current_view()
+
+    def remove_resume_certification(self, index: int) -> None:
+        certifications = self.state.resume_form.setdefault("certification_entries", [])
+        if 0 <= index < len(certifications):
+            certifications.pop(index)
+        self._sync_resume_certification_names()
+        if self.state.current_view == "resume":
+            self.render_current_view()
+
+    def _sync_resume_certification_names(self) -> None:
+        entries = self.state.resume_form.setdefault("certification_entries", [])
+        names = [normalize_whitespace(str(item.get("name") or "")) for item in entries if isinstance(item, dict)]
+        self.state.resume_form["certifications"] = [name for name in names if name]
 
     def save_resume_profile(self) -> None:
         try:

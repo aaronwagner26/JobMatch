@@ -859,6 +859,25 @@ class JobMatchEngine:
         basics = dict(profile.get("basics") or {})
         work_history = [dict(item) for item in (profile.get("work_history") or []) if isinstance(item, dict)]
         education = [dict(item) for item in (profile.get("education") or []) if isinstance(item, dict)]
+        certification_entries = [
+            {
+                "name": normalize_whitespace(str(item.get("name") or "")),
+                "expiration_date": normalize_whitespace(str(item.get("expiration_date") or "")),
+                "raw_text": normalize_whitespace(str(item.get("raw_text") or "")),
+            }
+            for item in (profile.get("certification_entries") or [])
+            if isinstance(item, dict) and normalize_whitespace(str(item.get("name") or ""))
+        ]
+        certification_names = JobMatchEngine._normalize_string_list(profile.get("certifications"))
+        certification_names = JobMatchEngine._merge_profile_strings(
+            certification_names,
+            [str(item.get("name") or "") for item in certification_entries],
+        )
+        if not certification_entries:
+            certification_entries = [
+                {"name": name, "expiration_date": "", "raw_text": ""}
+                for name in certification_names
+            ]
         normalized = {
             "basics": {
                 "full_name": normalize_whitespace(str(basics.get("full_name") or "")),
@@ -879,7 +898,7 @@ class JobMatchEngine:
                     "start_date": normalize_whitespace(str(item.get("start_date") or "")),
                     "end_date": normalize_whitespace(str(item.get("end_date") or "")),
                     "is_current": bool(item.get("is_current", False)),
-                    "description": clean_job_text(str(item.get("description") or "")),
+                    "description": JobMatchEngine._normalize_multiline_text(str(item.get("description") or "")),
                 }
                 for item in work_history
                 if any(normalize_whitespace(str(item.get(key) or "")) for key in ("title", "company", "description"))
@@ -891,14 +910,15 @@ class JobMatchEngine:
                     "field_of_study": normalize_whitespace(str(item.get("field_of_study") or "")),
                     "start_date": normalize_whitespace(str(item.get("start_date") or "")),
                     "end_date": normalize_whitespace(str(item.get("end_date") or "")),
-                    "description": clean_job_text(str(item.get("description") or "")),
+                    "description": JobMatchEngine._normalize_multiline_text(str(item.get("description") or "")),
                 }
                 for item in education
                 if any(normalize_whitespace(str(item.get(key) or "")) for key in ("school", "degree", "description"))
             ],
             "skills": JobMatchEngine._normalize_string_list(profile.get("skills")),
             "tools": JobMatchEngine._normalize_string_list(profile.get("tools")),
-            "certifications": JobMatchEngine._normalize_string_list(profile.get("certifications")),
+            "certifications": certification_names,
+            "certification_entries": certification_entries,
             "clearance_terms": JobMatchEngine._normalize_string_list(profile.get("clearance_terms")),
             "recent_titles": [],
             "experience_years": float(profile.get("experience_years") or basics.get("years_experience") or 0.0),
@@ -920,6 +940,21 @@ class JobMatchEngine:
             if normalized:
                 seen.setdefault(normalized.casefold(), normalized)
         return list(seen.values())
+
+    @staticmethod
+    def _merge_profile_strings(left: list[str], right: list[str]) -> list[str]:
+        seen: dict[str, str] = {}
+        for value in [*left, *right]:
+            normalized = normalize_whitespace(value)
+            if normalized:
+                seen.setdefault(normalized.casefold(), normalized)
+        return list(seen.values())
+
+    @staticmethod
+    def _normalize_multiline_text(value: str) -> str:
+        lines = [normalize_whitespace(line) for line in (value or "").splitlines()]
+        cleaned = [line for line in lines if line]
+        return "\n".join(cleaned)
 
     @staticmethod
     def _profile_recent_titles(profile: dict[str, object]) -> list[str]:

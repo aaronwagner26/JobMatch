@@ -158,6 +158,46 @@ def test_resume_parser_extracts_work_history_company_location_and_dates(tmp_path
     assert work_history[2]["company"] == "Northwind Traders"
 
 
+def test_resume_parser_ignores_contact_and_bullet_lines_when_parsing_work_metadata(tmp_path: Path) -> None:
+    resume_path = tmp_path / "resume.txt"
+    resume_path.write_text(
+        "\n".join(
+            [
+                "Jane Doe",
+                "jane@example.com",
+                "(555) 123-4567",
+                "SUMMARY",
+                "Infrastructure administrator.",
+                "EXPERIENCE",
+                "Example Technologies LLC",
+                "Senior Systems Administrator",
+                "Remote, US",
+                "Jan 2022 - Present",
+                "- Led Azure modernization.",
+                "jane@example.com",
+                "(555) 123-4567",
+                "Network Engineer",
+                "Contoso Systems",
+                "Denver, CO",
+                "Mar 2018 - Dec 2021",
+                "- Supported VMware infrastructure.",
+                "- Maintained Windows Server.",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    resume = ResumeParser().parse(resume_path)
+    work_history = resume.application_profile["work_history"]
+
+    assert work_history[1]["title"] == "Network Engineer"
+    assert work_history[1]["company"] == "Contoso Systems"
+    assert work_history[1]["location"] == "Denver, CO"
+    assert "@" not in work_history[1]["location"]
+    assert "555" not in work_history[1]["location"]
+    assert work_history[1]["description"] == "- Supported VMware infrastructure.\n- Maintained Windows Server."
+
+
 def test_resume_parser_keeps_certifications_out_of_education_entries(tmp_path: Path) -> None:
     resume_path = tmp_path / "resume.txt"
     resume_path.write_text(
@@ -185,6 +225,36 @@ def test_resume_parser_keeps_certifications_out_of_education_entries(tmp_path: P
     assert education[0]["school"] == "State University"
     assert education[0]["degree"] == "Bachelor of Science"
     assert education[0]["field_of_study"] == "Information Technology"
+
+
+def test_resume_parser_extracts_certification_expiration_and_education_dates(tmp_path: Path) -> None:
+    resume_path = tmp_path / "resume.txt"
+    resume_path.write_text(
+        "\n".join(
+            [
+                "Jane Doe",
+                "SUMMARY",
+                "Cloud administrator.",
+                "EDUCATION AND CERTIFICATIONS",
+                "State University",
+                "Bachelor of Science in Information Technology",
+                "Aug 2012 - May 2016",
+                "CompTIA Security+ expires 2027",
+                "AWS Certified Solutions Architect valid through Jan 2028",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    resume = ResumeParser().parse(resume_path)
+    education = resume.application_profile["education"]
+    cert_entries = resume.application_profile["certification_entries"]
+
+    assert education[0]["start_date"] == "2012-08-01"
+    assert education[0]["end_date"] == "2016-05-01"
+    assert {entry["name"] for entry in cert_entries} >= {"Security+", "AWS Solutions Architect"}
+    assert next(entry for entry in cert_entries if entry["name"] == "Security+")["expiration_date"] == "2027-01-01"
+    assert next(entry for entry in cert_entries if entry["name"] == "AWS Solutions Architect")["expiration_date"] == "2028-01-01"
 
 
 def test_engine_can_update_active_resume_profile(tmp_path: Path) -> None:
