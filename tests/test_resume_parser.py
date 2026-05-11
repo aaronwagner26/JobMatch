@@ -121,6 +121,72 @@ def test_resume_parser_builds_editable_application_profile(tmp_path: Path) -> No
     assert profile["education"]
 
 
+def test_resume_parser_extracts_work_history_company_location_and_dates(tmp_path: Path) -> None:
+    resume_path = tmp_path / "resume.txt"
+    resume_path.write_text(
+        "\n".join(
+            [
+                "Jane Doe",
+                "SUMMARY",
+                "Infrastructure administrator.",
+                "EXPERIENCE",
+                "Example Technologies LLC",
+                "Senior Systems Administrator",
+                "Remote, US",
+                "Jan 2022 - Present",
+                "- Managed Microsoft 365 and Azure operations.",
+                "Network Engineer | Contoso Systems | Denver, CO | Mar 2018 - Dec 2021",
+                "- Supported routing, switching, and VMware infrastructure.",
+                "Systems Administrator at Northwind Traders | Jan 2016 - Feb 2018",
+                "- Maintained Windows Server.",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    resume = ResumeParser().parse(resume_path)
+    work_history = resume.application_profile["work_history"]
+
+    assert work_history[0]["title"] == "Senior Systems Administrator"
+    assert work_history[0]["company"] == "Example Technologies LLC"
+    assert work_history[0]["location"] == "Remote, US"
+    assert work_history[0]["is_current"] is True
+    assert work_history[1]["title"] == "Network Engineer"
+    assert work_history[1]["company"] == "Contoso Systems"
+    assert work_history[1]["location"] == "Denver, CO"
+    assert work_history[2]["title"] == "Systems Administrator"
+    assert work_history[2]["company"] == "Northwind Traders"
+
+
+def test_resume_parser_keeps_certifications_out_of_education_entries(tmp_path: Path) -> None:
+    resume_path = tmp_path / "resume.txt"
+    resume_path.write_text(
+        "\n".join(
+            [
+                "Jane Doe",
+                "SUMMARY",
+                "Cloud administrator.",
+                "EDUCATION AND CERTIFICATIONS",
+                "State University",
+                "Bachelor of Science in Information Technology",
+                "CompTIA Security+",
+                "AWS Certified Solutions Architect",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    resume = ResumeParser().parse(resume_path)
+    education = resume.application_profile["education"]
+
+    assert "Security+" in resume.certifications
+    assert "AWS Solutions Architect" in resume.certifications
+    assert len(education) == 1
+    assert education[0]["school"] == "State University"
+    assert education[0]["degree"] == "Bachelor of Science"
+    assert education[0]["field_of_study"] == "Information Technology"
+
+
 def test_engine_can_update_active_resume_profile(tmp_path: Path) -> None:
     storage = Storage("sqlite+pysqlite:///:memory:")
     engine = JobMatchEngine(storage=storage)

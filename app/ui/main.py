@@ -177,6 +177,10 @@ ui.add_css(
     .chip-row { display: flex; flex-wrap: wrap; gap: 0.45rem; }
     .skill-chip { display: inline-flex; align-items: center; border-radius: 999px; padding: 0.15rem 0.55rem; background: var(--app-surface-2); color: var(--app-text); font-size: 0.8rem; }
     .resume-copy { min-height: 12rem; }
+    .resume-top-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(260px, 0.34fr); gap: 0.9rem; align-items: start; }
+    .resume-upload-compact .q-uploader__list { display: none; }
+    .resume-upload-compact .q-uploader__header { min-height: 2.5rem; border-radius: 12px; }
+    .resume-upload-compact { width: 100%; }
     .saved-resume-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0.75rem; align-items: center; padding: 0.8rem 0; border-top: 1px solid var(--app-border); }
     .saved-resume-row:first-of-type { border-top: 0; padding-top: 0.25rem; }
     .sources-grid { display: grid; grid-template-columns: minmax(320px, 0.95fr) minmax(420px, 1.2fr); gap: 1rem; width: 100%; }
@@ -188,6 +192,7 @@ ui.add_css(
       .stat-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
       .scan-grid, .scan-metrics { grid-template-columns: 1fr; }
       .sources-grid, .settings-grid { grid-template-columns: 1fr; }
+      .resume-top-row { grid-template-columns: 1fr; }
     }
     @media (max-width: 768px) {
       .content-shell { padding: 1rem; }
@@ -944,85 +949,76 @@ class JobMatchUI:
             with ui.row().classes("w-full items-end justify-between"):
                 with ui.column().classes("gap-1"):
                     ui.label("Resume").classes("page-title")
-                    ui.label("Upload once, then correct the parsed application profile so matching and autofill use the same structured data.").classes("page-subtitle")
+                    ui.label("Primary resume powers matching and extension fill data. Saved resumes stay available for later.").classes("page-subtitle")
                 if resume:
                     ui.button("Save profile edits", icon="save", on_click=self.save_resume_profile).props("unelevated")
 
-            with ui.grid(columns=2).classes("w-full gap-4"):
-                with ui.element("section").classes("panel"):
-                    ui.upload(
-                        label="Upload resume",
-                        auto_upload=True,
-                        max_file_size=20_000_000,
-                        on_upload=lambda e: asyncio.create_task(self.handle_resume_upload(e)),
-                        on_rejected=lambda: self._notify("Resume upload rejected.", type="negative"),
-                    ).props("accept=.pdf,.docx,.txt bordered").classes("w-full")
-                    ui.label("Supported formats: PDF and DOCX. Uploading replaces the active structured profile, which you can then edit below.").classes("mt-3 muted-copy")
-
-                with ui.element("section").classes("panel"):
-                    if not resume:
-                        self._empty_state("No resume is active yet.")
-                    else:
-                        ui.label(resume.filename).classes("text-lg font-semibold")
-                        ui.label(f"Estimated experience: {resume.experience_years:.1f} years").classes("muted-copy")
-                        basics = self.state.resume_form.get("basics", {})
-                        if basics.get("full_name"):
-                            ui.label(str(basics.get("full_name"))).classes("text-base font-medium mt-2")
-                        metric_line = []
-                        if basics.get("headline"):
-                            metric_line.append(str(basics.get("headline")))
-                        if basics.get("email"):
-                            metric_line.append(str(basics.get("email")))
-                        if metric_line:
-                            ui.label(" | ".join(metric_line)).classes("muted-copy")
-                        with ui.element("div").classes("chip-row mt-3"):
-                            ui.html(f'<span class="skill-chip">{len(self.state.resume_form.get("work_history", []))} jobs</span>', sanitize=False)
-                            ui.html(f'<span class="skill-chip">{len(self.state.resume_form.get("education", []))} education entries</span>', sanitize=False)
-                            ui.html(f'<span class="skill-chip">{len(self.state.resume_form.get("skills", []))} skills</span>', sanitize=False)
-                            if resume.clearance_terms:
-                                ui.html(f'<span class="skill-chip">{", ".join(resume.clearance_terms[:2])}</span>', sanitize=False)
-
-            with ui.element("section").classes("panel"):
-                with ui.row().classes("w-full items-center justify-between"):
+            with ui.element("section").classes("panel panel-tight"):
+                with ui.element("div").classes("resume-top-row"):
                     with ui.column().classes("gap-1"):
-                        ui.label("Saved resumes").classes("text-lg font-semibold")
-                        ui.label("Only the primary resume is used for matching. Other saved resumes are kept for future applying and comparison workflows.").classes("page-subtitle")
-                    if resume and resume.id is not None:
-                        ui.button(
-                            "Reparse primary",
-                            icon="auto_fix_high",
-                            on_click=lambda _, resume_id=resume.id: asyncio.create_task(self.handle_reparse_resume(resume_id)),
-                        ).props("flat")
-                if not saved_resumes:
-                    self._empty_state("No saved resumes yet.")
-                else:
-                    for saved in saved_resumes:
-                        profile = dict(saved.application_profile or {})
-                        work_count = len([item for item in (profile.get("work_history") or []) if isinstance(item, dict)])
-                        education_count = len([item for item in (profile.get("education") or []) if isinstance(item, dict)])
-                        updated_text = self._format_datetime(saved.updated_at)
-                        with ui.element("div").classes("saved-resume-row"):
-                            with ui.column().classes("gap-1"):
+                        if not resume:
+                            ui.label("No primary resume yet.").classes("text-lg font-semibold")
+                            ui.label("Upload a PDF, DOCX, or TXT resume to create the structured profile.").classes("muted-copy")
+                        else:
+                            basics = self.state.resume_form.get("basics", {})
+                            ui.label(resume.filename).classes("text-lg font-semibold")
+                            metric_line = [f"{resume.experience_years:.1f} years"]
+                            if basics.get("full_name"):
+                                metric_line.append(str(basics.get("full_name")))
+                            if basics.get("headline"):
+                                metric_line.append(str(basics.get("headline")))
+                            ui.label(" | ".join(metric_line)).classes("muted-copy")
+                            with ui.element("div").classes("chip-row mt-2"):
+                                ui.html(f'<span class="skill-chip">{len(self.state.resume_form.get("work_history", []))} jobs</span>', sanitize=False)
+                                ui.html(f'<span class="skill-chip">{len(self.state.resume_form.get("education", []))} education</span>', sanitize=False)
+                                ui.html(f'<span class="skill-chip">{len(self.state.resume_form.get("certifications", []))} certs</span>', sanitize=False)
+                                ui.html(f'<span class="skill-chip">{len(self.state.resume_form.get("skills", []))} skills</span>', sanitize=False)
+                    with ui.column().classes("gap-2"):
+                        ui.upload(
+                            label="Upload resume",
+                            auto_upload=True,
+                            max_file_size=20_000_000,
+                            on_upload=lambda e: asyncio.create_task(self.handle_resume_upload(e)),
+                            on_rejected=lambda: self._notify("Resume upload rejected.", type="negative"),
+                        ).props("accept=.pdf,.docx,.txt bordered").classes("resume-upload-compact")
+                        if resume and resume.id is not None:
+                            ui.button(
+                                "Reparse primary",
+                                icon="auto_fix_high",
+                                on_click=lambda _, resume_id=resume.id: asyncio.create_task(self.handle_reparse_resume(resume_id)),
+                            ).props("flat dense no-caps").classes("self-end")
+
+                with ui.expansion(f"Saved resumes ({len(saved_resumes)})", icon="folder", value=False).classes("w-full mt-2"):
+                    if not saved_resumes:
+                        ui.label("No saved resumes yet.").classes("muted-copy")
+                    else:
+                        for saved in saved_resumes:
+                            profile = dict(saved.application_profile or {})
+                            work_count = len([item for item in (profile.get("work_history") or []) if isinstance(item, dict)])
+                            education_count = len([item for item in (profile.get("education") or []) if isinstance(item, dict)])
+                            updated_text = self._format_datetime(saved.updated_at)
+                            with ui.element("div").classes("saved-resume-row"):
+                                with ui.column().classes("gap-1"):
+                                    with ui.row().classes("items-center gap-2"):
+                                        ui.label(saved.filename).classes("font-semibold")
+                                        if saved.is_active:
+                                            ui.html('<span class="application-chip application-chip-applied">Primary</span>', sanitize=False)
+                                    ui.label(
+                                        f"Updated {updated_text} | {work_count} jobs | {education_count} education | {len(saved.certifications)} certs | {len(saved.skills)} skills"
+                                    ).classes("muted-copy")
                                 with ui.row().classes("items-center gap-2"):
-                                    ui.label(saved.filename).classes("font-semibold")
-                                    if saved.is_active:
-                                        ui.html('<span class="application-chip application-chip-applied">Primary</span>', sanitize=False)
-                                ui.label(
-                                    f"Updated {updated_text} | {work_count} jobs | {education_count} education entries | {len(saved.skills)} skills"
-                                ).classes("muted-copy")
-                            with ui.row().classes("items-center gap-2"):
-                                if not saved.is_active and saved.id is not None:
-                                    ui.button(
-                                        "Make primary",
-                                        icon="check_circle",
-                                        on_click=lambda _, resume_id=saved.id: asyncio.create_task(self.handle_make_primary_resume(resume_id)),
-                                    ).props("flat no-caps")
-                                if saved.id is not None:
-                                    ui.button(
-                                        "Reparse",
-                                        icon="auto_fix_high",
-                                        on_click=lambda _, resume_id=saved.id: asyncio.create_task(self.handle_reparse_resume(resume_id)),
-                                    ).props("flat no-caps")
+                                    if not saved.is_active and saved.id is not None:
+                                        ui.button(
+                                            "Make primary",
+                                            icon="check_circle",
+                                            on_click=lambda _, resume_id=saved.id: asyncio.create_task(self.handle_make_primary_resume(resume_id)),
+                                        ).props("flat dense no-caps")
+                                    if saved.id is not None:
+                                        ui.button(
+                                            "Reparse",
+                                            icon="auto_fix_high",
+                                            on_click=lambda _, resume_id=saved.id: asyncio.create_task(self.handle_reparse_resume(resume_id)),
+                                        ).props("flat dense no-caps")
 
             if not resume:
                 return
